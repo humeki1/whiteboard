@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: whiteboard-server
+    env: node
+    rootDir: server
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/index.js
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_URL
+        sync: false  # Vercelデプロイ後にダッシュボードで設定
