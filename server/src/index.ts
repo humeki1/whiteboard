@@ -87,9 +87,9 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('undo', strokeId);
   });
 
-  socket.on('cursor-move', (pos: { x: number; y: number }) => {
+  socket.on('cursor-move', (data: { x: number; y: number; userName: string }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('cursor-move', { userId: socket.id, x: pos.x, y: pos.y });
+    socket.to(currentRoom).emit('cursor-move', { userId: socket.id, userName: data.userName, x: data.x, y: data.y });
   });
 
   socket.on('cursor-leave', () => {

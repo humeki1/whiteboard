@@ -2,12 +2,23 @@ import { useState } from 'react';
 import RoomJoin from './components/RoomJoin';
 import Whiteboard from './components/Whiteboard';
 
-export default function App() {
-  const [roomId, setRoomId] = useState<string | null>(null);
+interface Session {
+  roomId: string;
+  userName: string;
+}
 
-  if (!roomId) {
-    return <RoomJoin onJoin={setRoomId} />;
+export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+
+  if (!session) {
+    return <RoomJoin onJoin={(roomId, userName) => setSession({ roomId, userName })} />;
   }
 
-  return <Whiteboard roomId={roomId} onLeave={() => setRoomId(null)} />;
+  return (
+    <Whiteboard
+      roomId={session.roomId}
+      userName={session.userName}
+      onLeave={() => setSession(null)}
+    />
+  );
 }

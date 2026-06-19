@@ -10,7 +10,7 @@ type Callbacks = {
   onClear: () => void;
   onUndo: (strokeId: string) => void;
   onUserCount: (count: number) => void;
-  onCursorMove: (data: { userId: string; x: number; y: number }) => void;
+  onCursorMove: (data: { userId: string; userName: string; x: number; y: number }) => void;
   onCursorLeave: (userId: string) => void;
 };
 
@@ -29,7 +29,7 @@ export function useSocket(roomId: string, callbacks: Callbacks) {
     socket.on('clear',        ()               => cbRef.current.onClear());
     socket.on('undo',         (id: string)     => cbRef.current.onUndo(id));
     socket.on('user-count',   (n: number)      => cbRef.current.onUserCount(n));
-    socket.on('cursor-move',  (data: { userId: string; x: number; y: number }) => cbRef.current.onCursorMove(data));
+    socket.on('cursor-move',  (data: { userId: string; userName: string; x: number; y: number }) => cbRef.current.onCursorMove(data));
     socket.on('cursor-leave', (id: string)     => cbRef.current.onCursorLeave(id));
 
     return () => {
@@ -49,7 +49,7 @@ export function useSocket(roomId: string, callbacks: Callbacks) {
     socketRef.current?.emit('undo', strokeId);
   }, []);
 
-  const sendCursorMove = useCallback((pos: { x: number; y: number }) => {
+  const sendCursorMove = useCallback((pos: { x: number; y: number; userName: string }) => {
     socketRef.current?.emit('cursor-move', pos);
   }, []);
 

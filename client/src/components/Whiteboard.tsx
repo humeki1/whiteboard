@@ -6,6 +6,7 @@ import { useSocket } from '../hooks/useSocket';
 
 interface Props {
   roomId: string;
+  userName: string;
   onLeave: () => void;
 }
 
@@ -13,6 +14,7 @@ interface RemoteCursor {
   x: number;
   y: number;
   color: string;
+  userName: string;
 }
 
 function userColor(id: string): string {
@@ -78,7 +80,7 @@ function getEventPos(e: MouseEvent | TouchEvent, canvas: HTMLCanvasElement): Poi
   return { x: src.clientX - rect.left, y: src.clientY - rect.top };
 }
 
-export default function Whiteboard({ roomId, onLeave }: Props) {
+export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const [tool, setTool]           = useState<Tool>('pen');
   const [color, setColor]         = useState('#000000');
   const [width, setWidth]         = useState(4);
@@ -147,8 +149,8 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
     redrawBase();
   }, [redrawBase]);
 
-  const onCursorMove = useCallback(({ userId: uid, x, y }: { userId: string; x: number; y: number }) => {
-    setCursors((prev) => ({ ...prev, [uid]: { x, y, color: userColor(uid) } }));
+  const onCursorMove = useCallback(({ userId: uid, userName: uName, x, y }: { userId: string; userName: string; x: number; y: number }) => {
+    setCursors((prev) => ({ ...prev, [uid]: { x, y, color: userColor(uid), userName: uName } }));
   }, []);
 
   const onCursorLeave = useCallback((uid: string) => {
@@ -196,7 +198,7 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
       const now = Date.now();
       if (now - lastCursorSend.current > 30) {
         lastCursorSend.current = now;
-        sendCursorMove(pos);
+        sendCursorMove({ ...pos, userName });
       }
 
       if (!drawing.current || !activeStroke.current) return;
@@ -260,7 +262,7 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
       canvas.removeEventListener('touchmove',  move);
       canvas.removeEventListener('touchend',   end);
     };
-  }, [sendStroke, sendCursorMove, sendCursorLeave, userId]);
+  }, [sendStroke, sendCursorMove, sendCursorLeave, userId, userName]);
 
   const handleUndo = useCallback(() => {
     const mine = strokesRef.current.filter((s) => s.userId === userId);
@@ -339,7 +341,7 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
               whiteSpace: 'nowrap',
               fontFamily: 'system-ui, sans-serif',
             }}>
-              {uid.slice(-4)}
+              {cur.userName}
             </span>
           </div>
         ))}
