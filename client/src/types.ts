@@ -1,4 +1,4 @@
-export type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle';
+export type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle' | 'text';
 
 export interface Point {
   x: number;
@@ -12,4 +12,12 @@ export interface Stroke {
   width: number;
   points: Point[];
   userId: string;
+  text?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  userName: string;
+  text: string;
+  timestamp: number;
 }

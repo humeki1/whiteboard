@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Stroke } from '../types';
+import { Stroke, ChatMessage } from '../types';
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
 
@@ -12,6 +12,7 @@ type Callbacks = {
   onUserCount: (count: number) => void;
   onCursorMove: (data: { userId: string; userName: string; x: number; y: number }) => void;
   onCursorLeave: (userId: string) => void;
+  onChatMessage: (msg: ChatMessage) => void;
 };
 
 export function useSocket(roomId: string, callbacks: Callbacks) {
@@ -31,10 +32,9 @@ export function useSocket(roomId: string, callbacks: Callbacks) {
     socket.on('user-count',   (n: number)      => cbRef.current.onUserCount(n));
     socket.on('cursor-move',  (data: { userId: string; userName: string; x: number; y: number }) => cbRef.current.onCursorMove(data));
     socket.on('cursor-leave', (id: string)     => cbRef.current.onCursorLeave(id));
+    socket.on('chat-message', (msg: ChatMessage) => cbRef.current.onChatMessage(msg));
 
-    return () => {
-      socket.disconnect();
-    };
+    return () => { socket.disconnect(); };
   }, [roomId]);
 
   const sendStroke = useCallback((stroke: Stroke) => {
@@ -57,5 +57,9 @@ export function useSocket(roomId: string, callbacks: Callbacks) {
     socketRef.current?.emit('cursor-leave');
   }, []);
 
-  return { sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave };
+  const sendChatMessage = useCallback((msg: { id: string; userName: string; text: string }) => {
+    socketRef.current?.emit('chat-message', msg);
+  }, []);
+
+  return { sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave, sendChatMessage };
 }

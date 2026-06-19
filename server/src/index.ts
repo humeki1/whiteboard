@@ -87,6 +87,11 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('undo', strokeId);
   });
 
+  socket.on('chat-message', (data: { id: string; userName: string; text: string }) => {
+    if (!currentRoom) return;
+    io.to(currentRoom).emit('chat-message', { ...data, timestamp: Date.now() });
+  });
+
   socket.on('cursor-move', (data: { x: number; y: number; userName: string }) => {
     if (!currentRoom) return;
     socket.to(currentRoom).emit('cursor-move', { userId: socket.id, userName: data.userName, x: data.x, y: data.y });
