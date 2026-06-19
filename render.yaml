@@ -10,4 +10,15 @@ services:
       - key: NODE_ENV
         value: production
       - key: CLIENT_URL
-        sync: false  # Vercelデプロイ後にダッシュボードで設定
+        sync: false  # デプロイ後にダッシュボードでwhiteboard（静的サイト）のURLを設定
+
+  - type: web
+    name: whiteboard
+    env: static
+    rootDir: client
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    plan: free
+    envVars:
+      - key: VITE_SERVER_URL
+        sync: false  # デプロイ後にダッシュボードでwhiteboard-serverのURLを設定
