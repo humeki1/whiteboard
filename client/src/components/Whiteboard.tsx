@@ -9,7 +9,18 @@ interface Props {
   onLeave: () => void;
 }
 
-// Draw a single stroke onto a canvas context. Defined at module level for stability.
+interface RemoteCursor {
+  x: number;
+  y: number;
+  color: string;
+}
+
+function userColor(id: string): string {
+  let h = 0;
+  for (const c of id) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
+  return `hsl(${h % 360}, 75%, 48%)`;
+}
+
 function renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
   const { tool, color, width, points } = stroke;
   if (points.length === 0) return;
@@ -64,10 +75,7 @@ function renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
 function getEventPos(e: MouseEvent | TouchEvent, canvas: HTMLCanvasElement): Point {
   const rect = canvas.getBoundingClientRect();
   const src = 'touches' in e ? e.touches[0] : e;
-  return {
-    x: src.clientX - rect.left,
-    y: src.clientY - rect.top,
-  };
+  return { x: src.clientX - rect.left, y: src.clientY - rect.top };
 }
 
 export default function Whiteboard({ roomId, onLeave }: Props) {
@@ -75,18 +83,18 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
   const [color, setColor]         = useState('#000000');
   const [width, setWidth]         = useState(4);
   const [userCount, setUserCount] = useState(1);
+  const [cursors, setCursors]     = useState<Record<string, RemoteCursor>>({});
 
-  // Two stacked canvases: base = committed strokes, overlay = in-progress stroke
   const baseRef    = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
 
-  const strokesRef       = useRef<Stroke[]>([]);
-  const activeStroke     = useRef<Stroke | null>(null);
-  const drawing          = useRef(false);
-  const startPt          = useRef<Point>({ x: 0, y: 0 });
-  const userId           = useRef(uuid()).current;
+  const strokesRef      = useRef<Stroke[]>([]);
+  const activeStroke    = useRef<Stroke | null>(null);
+  const drawing         = useRef(false);
+  const startPt         = useRef<Point>({ x: 0, y: 0 });
+  const lastCursorSend  = useRef(0);
+  const userId          = useRef(uuid()).current;
 
-  // Current tool/color/width in refs so event handlers always see latest values
   const toolRef  = useRef(tool);
   const colorRef = useRef(color);
   const widthRef = useRef(width);
@@ -94,7 +102,7 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
   colorRef.current = color;
   widthRef.current = width;
 
-  const baseCtx = () => baseRef.current?.getContext('2d') ?? null;
+  const baseCtx    = () => baseRef.current?.getContext('2d') ?? null;
   const overlayCtx = () => overlayRef.current?.getContext('2d') ?? null;
 
   const redrawBase = useCallback(() => {
@@ -114,14 +122,10 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
     base.width    = w; base.height    = h;
     overlay.width = w; overlay.height = h;
     const ctx = baseCtx();
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, w, h);
-    }
+    if (ctx) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); }
     redrawBase();
   }, [redrawBase]);
 
-  // Socket callbacks
   const onInit = useCallback((strokes: Stroke[]) => {
     strokesRef.current = strokes;
     redrawBase();
@@ -143,18 +147,28 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
     redrawBase();
   }, [redrawBase]);
 
-  const { sendStroke, sendClear, sendUndo } = useSocket(roomId, {
-    onInit, onStroke, onClear, onUndo, onUserCount: setUserCount,
+  const onCursorMove = useCallback(({ userId: uid, x, y }: { userId: string; x: number; y: number }) => {
+    setCursors((prev) => ({ ...prev, [uid]: { x, y, color: userColor(uid) } }));
+  }, []);
+
+  const onCursorLeave = useCallback((uid: string) => {
+    setCursors((prev) => {
+      const next = { ...prev };
+      delete next[uid];
+      return next;
+    });
+  }, []);
+
+  const { sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave } = useSocket(roomId, {
+    onInit, onStroke, onClear, onUndo, onUserCount: setUserCount, onCursorMove, onCursorLeave,
   });
 
-  // Initialize canvases on mount and handle window resize
   useEffect(() => {
     resizeCanvases();
     window.addEventListener('resize', resizeCanvases);
     return () => window.removeEventListener('resize', resizeCanvases);
   }, [resizeCanvases]);
 
-  // Mouse/touch event handlers on the overlay canvas
   useEffect(() => {
     const canvas = overlayRef.current;
     if (!canvas) return;
@@ -176,16 +190,22 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
 
     const move = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
-      if (!drawing.current || !activeStroke.current) return;
       const pos = getEventPos(e, canvas);
-      const s = activeStroke.current;
 
+      // カーソル位置を30msごとに送信
+      const now = Date.now();
+      if (now - lastCursorSend.current > 30) {
+        lastCursorSend.current = now;
+        sendCursorMove(pos);
+      }
+
+      if (!drawing.current || !activeStroke.current) return;
+      const s = activeStroke.current;
       if (s.tool === 'pen' || s.tool === 'eraser') {
         s.points.push(pos);
       } else {
         s.points = [startPt.current, pos];
       }
-
       const ctx = overlayCtx();
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -197,39 +217,50 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
       e.preventDefault();
       if (!drawing.current || !activeStroke.current) return;
       drawing.current = false;
-
       const stroke = activeStroke.current;
       activeStroke.current = null;
-
-      // Commit stroke to base canvas
       strokesRef.current.push(stroke);
       const bCtx = baseCtx();
       if (bCtx) renderStroke(bCtx, stroke);
-
       const oCtx = overlayCtx();
       if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
-
       sendStroke(stroke);
     };
 
-    canvas.addEventListener('mousedown',  start,  { passive: false });
-    canvas.addEventListener('mousemove',  move,   { passive: false });
-    canvas.addEventListener('mouseup',    end,    { passive: false });
-    canvas.addEventListener('mouseleave', end,    { passive: false });
-    canvas.addEventListener('touchstart', start,  { passive: false });
-    canvas.addEventListener('touchmove',  move,   { passive: false });
-    canvas.addEventListener('touchend',   end,    { passive: false });
+    const leave = () => {
+      sendCursorLeave();
+      // マウスボタン押したまま出た場合はストローク終了
+      if (drawing.current && activeStroke.current) {
+        drawing.current = false;
+        const stroke = activeStroke.current;
+        activeStroke.current = null;
+        strokesRef.current.push(stroke);
+        const bCtx = baseCtx();
+        if (bCtx) renderStroke(bCtx, stroke);
+        const oCtx = overlayCtx();
+        if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
+        sendStroke(stroke);
+      }
+    };
+
+    canvas.addEventListener('mousedown',  start, { passive: false });
+    canvas.addEventListener('mousemove',  move,  { passive: false });
+    canvas.addEventListener('mouseup',    end,   { passive: false });
+    canvas.addEventListener('mouseleave', leave, { passive: false });
+    canvas.addEventListener('touchstart', start, { passive: false });
+    canvas.addEventListener('touchmove',  move,  { passive: false });
+    canvas.addEventListener('touchend',   end,   { passive: false });
 
     return () => {
       canvas.removeEventListener('mousedown',  start);
       canvas.removeEventListener('mousemove',  move);
       canvas.removeEventListener('mouseup',    end);
-      canvas.removeEventListener('mouseleave', end);
+      canvas.removeEventListener('mouseleave', leave);
       canvas.removeEventListener('touchstart', start);
       canvas.removeEventListener('touchmove',  move);
       canvas.removeEventListener('touchend',   end);
     };
-  }, [sendStroke, userId]);
+  }, [sendStroke, sendCursorMove, sendCursorLeave, userId]);
 
   const handleUndo = useCallback(() => {
     const mine = strokesRef.current.filter((s) => s.userId === userId);
@@ -249,15 +280,12 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
     const base    = baseRef.current;
     const overlay = overlayRef.current;
     if (!base || !overlay) return;
-
-    // Merge base + overlay for export
     const merged = document.createElement('canvas');
     merged.width  = base.width;
     merged.height = base.height;
     const ctx = merged.getContext('2d')!;
     ctx.drawImage(base, 0, 0);
     ctx.drawImage(overlay, 0, 0);
-
     const link = document.createElement('a');
     link.download = `whiteboard-${roomId}.png`;
     link.href = merged.toDataURL('image/png');
@@ -269,22 +297,52 @@ export default function Whiteboard({ roomId, onLeave }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh' }}>
       <Toolbar
-        tool={tool}
-        color={color}
-        width={width}
-        userCount={userCount}
-        roomId={roomId}
-        onToolChange={setTool}
-        onColorChange={setColor}
-        onWidthChange={setWidth}
-        onClear={handleClear}
-        onUndo={handleUndo}
-        onExport={handleExport}
-        onLeave={onLeave}
+        tool={tool} color={color} width={width} userCount={userCount} roomId={roomId}
+        onToolChange={setTool} onColorChange={setColor} onWidthChange={setWidth}
+        onClear={handleClear} onUndo={handleUndo} onExport={handleExport} onLeave={onLeave}
       />
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#fff' }}>
         <canvas ref={baseRef}    style={{ position: 'absolute', inset: 0 }} />
         <canvas ref={overlayRef} style={{ position: 'absolute', inset: 0, cursor }} />
+
+        {/* 他ユーザーのカーソル */}
+        {Object.entries(cursors).map(([uid, cur]) => (
+          <div
+            key={uid}
+            style={{
+              position: 'absolute',
+              left: cur.x,
+              top: cur.y,
+              pointerEvents: 'none',
+              transform: 'translate(0, 0)',
+              zIndex: 20,
+            }}
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" style={{ display: 'block' }}>
+              <path
+                d="M4 2 L4 16 L7.5 12.5 L10.5 18.5 L12.5 17.5 L9.5 11 L14 11 Z"
+                fill={cur.color}
+                stroke="white"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span style={{
+              display: 'inline-block',
+              background: cur.color,
+              color: '#fff',
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '1px 5px',
+              borderRadius: 4,
+              marginTop: 2,
+              whiteSpace: 'nowrap',
+              fontFamily: 'system-ui, sans-serif',
+            }}>
+              {uid.slice(-4)}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );

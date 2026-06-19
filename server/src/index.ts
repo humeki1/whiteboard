@@ -87,11 +87,22 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('undo', strokeId);
   });
 
+  socket.on('cursor-move', (pos: { x: number; y: number }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('cursor-move', { userId: socket.id, x: pos.x, y: pos.y });
+  });
+
+  socket.on('cursor-leave', () => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('cursor-leave', socket.id);
+  });
+
   socket.on('disconnect', () => {
     if (!currentRoom) return;
     const room = getRoom(currentRoom);
     room.users.delete(socket.id);
     io.to(currentRoom).emit('user-count', room.users.size);
+    io.to(currentRoom).emit('cursor-leave', socket.id);
   });
 });
 
