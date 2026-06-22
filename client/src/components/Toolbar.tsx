@@ -19,6 +19,7 @@ interface Props {
 }
 
 const TOOLS: { id: Tool; icon: string; title: string }[] = [
+  { id: 'select',    icon: '↖',  title: '選択・移動' },
   { id: 'pen',       icon: '✏️', title: 'ペン' },
   { id: 'eraser',    icon: '⬜', title: '消しゴム' },
   { id: 'line',      icon: '╱',  title: '直線' },

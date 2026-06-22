@@ -153,6 +153,20 @@ io.on('connection', (socket) => {
     io.to(tabRoomId(currentRoomId, currentTabId)).emit('undo', strokeId);
   });
 
+  socket.on('move-strokes', (data: { ids: string[]; dx: number; dy: number }) => {
+    if (!currentRoomId || !currentTabId) return;
+    const room = getRoom(currentRoomId);
+    const tab = room.tabs.find((t) => t.id === currentTabId);
+    if (!tab) return;
+    const idsSet = new Set(data.ids);
+    tab.strokes = tab.strokes.map((s) =>
+      idsSet.has(s.id)
+        ? { ...s, points: s.points.map((p) => ({ x: p.x + data.dx, y: p.y + data.dy })) }
+        : s
+    );
+    socket.to(tabRoomId(currentRoomId, currentTabId)).emit('move-strokes', data);
+  });
+
   socket.on('chat-message', (data: { id: string; userName: string; text: string }) => {
     if (!currentRoomId) return;
     // socket.to (not io.to): excludes sender — client adds message locally to avoid duplicate

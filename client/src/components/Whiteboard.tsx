@@ -6,24 +6,10 @@ import TabBar from './TabBar';
 import ChatPanel from './ChatPanel';
 import { useSocket } from '../hooks/useSocket';
 
-interface Props {
-  roomId: string;
-  userName: string;
-  onLeave: () => void;
-}
-
-interface RemoteCursor {
-  x: number;
-  y: number;
-  color: string;
-  userName: string;
-}
-
-interface TextInput {
-  x: number;
-  y: number;
-  value: string;
-}
+interface Props { roomId: string; userName: string; onLeave: () => void; }
+interface RemoteCursor { x: number; y: number; color: string; userName: string; }
+interface TextInputState { x: number; y: number; value: string; }
+type SelectMode = 'idle' | 'selecting' | 'selected' | 'moving';
 
 function userColor(id: string): string {
   let h = 0;
@@ -31,54 +17,87 @@ function userColor(id: string): string {
   return `hsl(${h % 360}, 75%, 48%)`;
 }
 
+function getStrokeBbox(s: Stroke): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  if (s.points.length === 0) return null;
+  if (s.tool === 'text' && s.text) {
+    const fs = Math.max(12, s.width * 4);
+    const lines = s.text.split('\n');
+    const p = s.points[0];
+    return { minX: p.x - 2, minY: p.y - fs - 2, maxX: p.x + Math.max(...lines.map(l => l.length)) * fs * 0.62 + 2, maxY: p.y + (lines.length - 1) * fs * 1.3 + 2 };
+  }
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of s.points) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const pad = s.width / 2 + 2;
+  return { minX: x0 - pad, minY: y0 - pad, maxX: x1 + pad, maxY: y1 + pad };
+}
+
+function getStrokesBbox(strokes: Stroke[]): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of strokes) {
+    const b = getStrokeBbox(s);
+    if (b) { x0 = Math.min(x0, b.minX); y0 = Math.min(y0, b.minY); x1 = Math.max(x1, b.maxX); y1 = Math.max(y1, b.maxY); }
+  }
+  return isFinite(x0) ? { minX: x0, minY: y0, maxX: x1, maxY: y1 } : null;
+}
+
+function bboxContains(b: ReturnType<typeof getStrokesBbox>, p: Point) {
+  return b != null && p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY;
+}
+
+function strokeInRect(s: Stroke, rx: number, ry: number, rw: number, rh: number) {
+  const b = getStrokeBbox(s);
+  if (!b) return false;
+  const x1 = Math.min(rx, rx + rw), x2 = Math.max(rx, rx + rw);
+  const y1 = Math.min(ry, ry + rh), y2 = Math.max(ry, ry + rh);
+  return b.maxX >= x1 && b.minX <= x2 && b.maxY >= y1 && b.minY <= y2;
+}
+
+function drawSelBox(ctx: CanvasRenderingContext2D, b: NonNullable<ReturnType<typeof getStrokesBbox>>) {
+  const p = 6;
+  ctx.save();
+  ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 3]);
+  ctx.fillStyle = 'rgba(37,99,235,0.04)';
+  ctx.fillRect(b.minX - p, b.minY - p, b.maxX - b.minX + p * 2, b.maxY - b.minY + p * 2);
+  ctx.strokeRect(b.minX - p, b.minY - p, b.maxX - b.minX + p * 2, b.maxY - b.minY + p * 2);
+  ctx.setLineDash([]); ctx.restore();
+}
+
 function renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
   const { tool, color, width, points } = stroke;
   if (points.length === 0) return;
-
   ctx.save();
   ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : color;
   ctx.fillStyle   = tool === 'eraser' ? '#ffffff' : color;
-  ctx.lineWidth   = width;
-  ctx.lineCap     = 'round';
-  ctx.lineJoin    = 'round';
-
+  ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   const [first, ...rest] = points;
-
   if (tool === 'pen' || tool === 'eraser') {
-    ctx.beginPath();
-    ctx.moveTo(first.x, first.y);
-    if (rest.length === 0) {
-      ctx.arc(first.x, first.y, width / 2, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
+    ctx.beginPath(); ctx.moveTo(first.x, first.y);
+    if (rest.length === 0) { ctx.arc(first.x, first.y, width / 2, 0, Math.PI * 2); ctx.fill(); }
+    else {
       for (let i = 0; i < rest.length - 1; i++) {
-        const mid = { x: (rest[i].x + rest[i + 1].x) / 2, y: (rest[i].y + rest[i + 1].y) / 2 };
+        const mid = { x: (rest[i].x + rest[i+1].x)/2, y: (rest[i].y + rest[i+1].y)/2 };
         ctx.quadraticCurveTo(rest[i].x, rest[i].y, mid.x, mid.y);
       }
-      ctx.lineTo(rest[rest.length - 1].x, rest[rest.length - 1].y);
-      ctx.stroke();
+      ctx.lineTo(rest[rest.length-1].x, rest[rest.length-1].y); ctx.stroke();
     }
   } else if (tool === 'line') {
-    const last = points[points.length - 1];
+    const last = points[points.length-1];
     ctx.beginPath(); ctx.moveTo(first.x, first.y); ctx.lineTo(last.x, last.y); ctx.stroke();
   } else if (tool === 'rectangle') {
-    const last = points[points.length - 1];
-    ctx.beginPath();
-    ctx.strokeRect(first.x, first.y, last.x - first.x, last.y - first.y);
+    const last = points[points.length-1];
+    ctx.beginPath(); ctx.strokeRect(first.x, first.y, last.x-first.x, last.y-first.y);
   } else if (tool === 'circle') {
-    const last = points[points.length - 1];
-    const rx = Math.abs(last.x - first.x) / 2;
-    const ry = Math.abs(last.y - first.y) / 2;
+    const last = points[points.length-1];
     ctx.beginPath();
-    ctx.ellipse((first.x + last.x) / 2, (first.y + last.y) / 2, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
+    ctx.ellipse((first.x+last.x)/2, (first.y+last.y)/2, Math.max(Math.abs(last.x-first.x)/2,1), Math.max(Math.abs(last.y-first.y)/2,1), 0, 0, Math.PI*2);
     ctx.stroke();
   } else if (tool === 'text' && stroke.text) {
     const fontSize = Math.max(12, width * 4);
     ctx.font = `${fontSize}px system-ui, sans-serif`;
     ctx.fillStyle = color;
-    ctx.fillText(stroke.text, first.x, first.y);
+    stroke.text.split('\n').forEach((line, i) => ctx.fillText(line, first.x, first.y + i * fontSize * 1.3));
   }
-
   ctx.restore();
 }
 
@@ -89,54 +108,69 @@ function getEventPos(e: MouseEvent | TouchEvent, canvas: HTMLCanvasElement): Poi
 }
 
 export default function Whiteboard({ roomId, userName, onLeave }: Props) {
-  const [tool, setTool]           = useState<Tool>('pen');
-  const [color, setColor]         = useState('#000000');
-  const [width, setWidth]         = useState(4);
+  const [tool, setTool]     = useState<Tool>('pen');
+  const [color, setColor]   = useState('#000000');
+  const [width, setWidth]   = useState(4);
   const [userCount, setUserCount] = useState(1);
   const [cursors, setCursors]     = useState<Record<string, RemoteCursor>>({});
   const [chatOpen, setChatOpen]   = useState(false);
   const [unread, setUnread]       = useState(0);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
+  // Tab state
   const [tabs, setTabs]                 = useState<TabInfo[]>([]);
-  const [currentTabId, setCurrentTabId] = useState<string>('');
+  const [currentTabId, setCurrentTabId] = useState('');
   const [userTabs, setUserTabs]         = useState<UserTabInfo[]>([]);
-  const [mySocketId, setMySocketId]     = useState<string>('');
+  const [mySocketId, setMySocketId]     = useState('');
 
-  const textInputStateRef = useRef<TextInput | null>(null);
-  const [textInput, setTextInputRaw] = useState<TextInput | null>(null);
-  const setTextInput = (val: TextInput | null) => {
-    textInputStateRef.current = val;
-    setTextInputRaw(val);
-  };
+  // Text overlay
+  const textStateRef = useRef<TextInputState | null>(null);
+  const [textInput, setTextInputRaw] = useState<TextInputState | null>(null);
+  const setTextInput = (v: TextInputState | null) => { textStateRef.current = v; setTextInputRaw(v); };
+
+  // Selection state (refs for event handlers, state for rendering)
+  const [selectMode, setSelectMode]     = useState<SelectMode>('idle');
+  const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
+  const selectModeRef  = useRef<SelectMode>('idle');
+  const selectedIdsRef = useRef<Set<string>>(new Set());
+  const selStartRef    = useRef<Point>({ x: 0, y: 0 });
+  const moveStartRef   = useRef<Point>({ x: 0, y: 0 });
+  const preMoveRef     = useRef<ImageData | null>(null);
+
+  const setSelMode = useCallback((m: SelectMode) => { selectModeRef.current = m; setSelectMode(m); }, []);
+  const setSelected = useCallback((ids: Set<string>) => { selectedIdsRef.current = ids; setSelectedIds(ids); }, []);
 
   const baseRef    = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  const strokesRef   = useRef<Stroke[]>([]);
+  const activeStroke = useRef<Stroke | null>(null);
+  const drawing      = useRef(false);
+  const startPt      = useRef<Point>({ x: 0, y: 0 });
+  const cursorTimer  = useRef(0);
+  const userId       = useRef(uuid()).current;
 
-  const strokesRef     = useRef<Stroke[]>([]);
-  const activeStroke   = useRef<Stroke | null>(null);
-  const drawing        = useRef(false);
-  const startPt        = useRef<Point>({ x: 0, y: 0 });
-  const lastCursorSend = useRef(0);
-  const userId         = useRef(uuid()).current;
-
-  const toolRef  = useRef(tool);
-  const colorRef = useRef(color);
-  const widthRef = useRef(width);
-  toolRef.current  = tool;
-  colorRef.current = color;
-  widthRef.current = width;
+  const toolRef  = useRef(tool);  toolRef.current  = tool;
+  const colorRef = useRef(color); colorRef.current = color;
+  const widthRef = useRef(width); widthRef.current = width;
 
   const baseCtx    = () => baseRef.current?.getContext('2d') ?? null;
   const overlayCtx = () => overlayRef.current?.getContext('2d') ?? null;
 
-  const redrawBase = useCallback(() => {
-    const canvas = baseRef.current;
-    const ctx = baseCtx();
+  const redrawBase = useCallback((skipIds?: ReadonlySet<string>) => {
+    const canvas = baseRef.current; const ctx = baseCtx();
     if (!canvas || !ctx) return;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    strokesRef.current.forEach((s) => renderStroke(ctx, s));
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    strokesRef.current.forEach(s => { if (!skipIds?.has(s.id)) renderStroke(ctx, s); });
+  }, []);
+
+  const showSelOverlay = useCallback(() => {
+    const overlay = overlayRef.current; const oCtx = overlayCtx();
+    if (!oCtx || !overlay) return;
+    oCtx.clearRect(0, 0, overlay.width, overlay.height);
+    if (selectedIdsRef.current.size > 0) {
+      const bb = getStrokesBbox(strokesRef.current.filter(s => selectedIdsRef.current.has(s.id)));
+      if (bb) drawSelBox(oCtx, bb);
+    }
   }, []);
 
   const resizeCanvases = useCallback(() => {
@@ -149,38 +183,37 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     redrawBase();
   }, [redrawBase]);
 
+  const sendStrokeRef      = useRef<(s: Stroke) => void>(() => {});
+  const sendMoveStrokesRef = useRef<(d: { ids: string[]; dx: number; dy: number }) => void>(() => {});
+  const sendSwitchTabRef   = useRef<(id: string) => void>(() => {});
+
   const commitText = useCallback(() => {
-    const ti = textInputStateRef.current;
+    const ti = textStateRef.current;
     setTextInput(null);
     if (!ti || !ti.value.trim()) return;
     const stroke: Stroke = {
-      id: uuid(), tool: 'text',
-      color: colorRef.current, width: widthRef.current,
-      points: [{ x: ti.x, y: ti.y }],
-      text: ti.value.trim(), userId,
+      id: uuid(), tool: 'text', color: colorRef.current, width: widthRef.current,
+      points: [{ x: ti.x, y: ti.y }], text: ti.value.trim(), userId,
     };
     strokesRef.current.push(stroke);
-    const ctx = baseCtx();
-    if (ctx) renderStroke(ctx, stroke);
+    const ctx = baseCtx(); if (ctx) renderStroke(ctx, stroke);
     sendStrokeRef.current(stroke);
   }, [userId]);
 
-  const sendStrokeRef = useRef<(s: Stroke) => void>(() => {});
-
+  // Socket callbacks
   const onInitRoom = useCallback((data: InitRoomData) => {
-    setMySocketId(data.socketId);
-    setTabs(data.tabs);
-    setCurrentTabId(data.currentTabId);
-    setUserTabs(data.userTabs);
-    strokesRef.current = data.strokes;
-    redrawBase();
-  }, [redrawBase]);
+    setMySocketId(data.socketId); setTabs(data.tabs); setCurrentTabId(data.currentTabId);
+    setUserTabs(data.userTabs); setSelected(new Set()); setSelMode('idle');
+    strokesRef.current = data.strokes; redrawBase();
+  }, [redrawBase, setSelected, setSelMode]);
 
   const onInitTab = useCallback((strokes: Stroke[]) => {
-    strokesRef.current = strokes;
-    setCursors({});
+    setSelected(new Set()); setSelMode('idle');
+    strokesRef.current = strokes; setCursors({});
+    const oCtx = overlayCtx(); const ov = overlayRef.current;
+    if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
     redrawBase();
-  }, [redrawBase]);
+  }, [redrawBase, setSelected, setSelMode]);
 
   const onStroke = useCallback((stroke: Stroke) => {
     strokesRef.current.push(stroke);
@@ -188,71 +221,76 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   }, []);
 
   const onClear = useCallback(() => {
+    setSelected(new Set()); setSelMode('idle');
     strokesRef.current = []; redrawBase();
-  }, [redrawBase]);
+  }, [redrawBase, setSelected, setSelMode]);
 
   const onUndo = useCallback((strokeId: string) => {
-    strokesRef.current = strokesRef.current.filter((s) => s.id !== strokeId); redrawBase();
+    strokesRef.current = strokesRef.current.filter(s => s.id !== strokeId);
+    if (selectedIdsRef.current.has(strokeId)) {
+      const next = new Set(selectedIdsRef.current); next.delete(strokeId); setSelected(next);
+    }
+    redrawBase();
+    requestAnimationFrame(showSelOverlay);
+  }, [redrawBase, setSelected, showSelOverlay]);
+
+  const onMoveStrokes = useCallback((data: { ids: string[]; dx: number; dy: number }) => {
+    const idsSet = new Set(data.ids);
+    strokesRef.current = strokesRef.current.map(s =>
+      idsSet.has(s.id) ? { ...s, points: s.points.map(p => ({ x: p.x + data.dx, y: p.y + data.dy })) } : s
+    );
+    redrawBase();
   }, [redrawBase]);
 
-  const onTabCreated = useCallback((tab: TabInfo) => {
-    setTabs((prev) => [...prev, tab]);
-  }, []);
-
-  const onUserTabUpdate = useCallback((data: UserTabInfo) => {
-    setUserTabs((prev) => [...prev.filter((u) => u.userId !== data.userId), data]);
-  }, []);
-
-  const onUserLeft = useCallback((uid: string) => {
-    setUserTabs((prev) => prev.filter((u) => u.userId !== uid));
-    setCursors((prev) => { const next = { ...prev }; delete next[uid]; return next; });
-  }, []);
-
-  const onCursorMove = useCallback(({ userId: uid, userName: uName, x, y }: { userId: string; userName: string; x: number; y: number }) => {
-    setCursors((prev) => ({ ...prev, [uid]: { x, y, color: userColor(uid), userName: uName } }));
-  }, []);
-
-  const onCursorLeave = useCallback((uid: string) => {
-    setCursors((prev) => { const next = { ...prev }; delete next[uid]; return next; });
-  }, []);
-
-  const onChatMessage = useCallback((msg: ChatMessage) => {
-    setChatMessages((prev) => [...prev, msg]);
-    setChatOpen((open) => {
-      if (!open) setUnread((n) => n + 1);
-      return open;
-    });
-  }, []);
+  const onTabCreated = useCallback((tab: TabInfo) => { setTabs(prev => [...prev, tab]); }, []);
 
   const onTabDeleted = useCallback((deletedTabId: string) => {
-    setTabs((prev) => prev.filter((t) => t.id !== deletedTabId));
+    setTabs(prev => prev.filter(t => t.id !== deletedTabId));
     if (currentTabId === deletedTabId) {
-      const remaining = tabs.filter((t) => t.id !== deletedTabId);
+      const remaining = tabs.filter(t => t.id !== deletedTabId);
       if (remaining.length > 0) {
         const next = remaining[0];
-        setCurrentTabId(next.id);
-        strokesRef.current = [];
-        setCursors({});
-        redrawBase();
+        setCurrentTabId(next.id); setSelected(new Set()); setSelMode('idle');
+        strokesRef.current = []; setCursors({}); redrawBase();
         sendSwitchTabRef.current(next.id);
       }
     }
-  }, [currentTabId, tabs, redrawBase]);
+  }, [currentTabId, tabs, redrawBase, setSelected, setSelMode]);
 
-  const sendSwitchTabRef = useRef<(id: string) => void>(() => {});
+  const onUserTabUpdate = useCallback((data: UserTabInfo) => {
+    setUserTabs(prev => [...prev.filter(u => u.userId !== data.userId), data]);
+  }, []);
+
+  const onUserLeft = useCallback((uid: string) => {
+    setUserTabs(prev => prev.filter(u => u.userId !== uid));
+    setCursors(prev => { const next = { ...prev }; delete next[uid]; return next; });
+  }, []);
+
+  const onCursorMove = useCallback(({ userId: uid, userName: uName, x, y }: { userId: string; userName: string; x: number; y: number }) => {
+    setCursors(prev => ({ ...prev, [uid]: { x, y, color: userColor(uid), userName: uName } }));
+  }, []);
+
+  const onCursorLeave = useCallback((uid: string) => {
+    setCursors(prev => { const next = { ...prev }; delete next[uid]; return next; });
+  }, []);
+
+  const onChatMessage = useCallback((msg: ChatMessage) => {
+    setChatMessages(prev => [...prev, msg]);
+    setChatOpen(open => { if (!open) setUnread(n => n + 1); return open; });
+  }, []);
 
   const {
     sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave,
-    sendChatMessage, sendSwitchTab, sendCreateTab, sendDeleteTab,
+    sendChatMessage, sendSwitchTab, sendCreateTab, sendDeleteTab, sendMoveStrokes,
   } = useSocket(roomId, userName, {
-    onInitRoom, onInitTab, onStroke, onClear, onUndo,
+    onInitRoom, onInitTab, onStroke, onClear, onUndo, onMoveStrokes,
     onUserCount: setUserCount, onTabCreated, onTabDeleted, onUserTabUpdate,
     onUserLeft, onCursorMove, onCursorLeave, onChatMessage,
   });
 
-  sendSwitchTabRef.current = sendSwitchTab;
-
-  sendStrokeRef.current = sendStroke;
+  sendStrokeRef.current      = sendStroke;
+  sendMoveStrokesRef.current = sendMoveStrokes;
+  sendSwitchTabRef.current   = sendSwitchTab;
 
   useEffect(() => {
     resizeCanvases();
@@ -260,6 +298,32 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     return () => window.removeEventListener('resize', resizeCanvases);
   }, [resizeCanvases]);
 
+  // Clear selection when switching away from select tool
+  useEffect(() => {
+    if (tool !== 'select') {
+      selectedIdsRef.current = new Set(); setSelectedIds(new Set());
+      selectModeRef.current = 'idle'; setSelectMode('idle');
+      const oCtx = overlayCtx(); const ov = overlayRef.current;
+      if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
+    }
+  }, [tool]);
+
+  // Escape key: cancel text or deselect
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (textStateRef.current) { setTextInput(null); return; }
+      if (selectModeRef.current !== 'idle') {
+        setSelected(new Set()); setSelMode('idle');
+        const oCtx = overlayCtx(); const ov = overlayRef.current;
+        if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [setSelected, setSelMode]);
+
+  // Canvas event handlers
   useEffect(() => {
     const canvas = overlayRef.current;
     if (!canvas) return;
@@ -267,46 +331,128 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     const start = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
       const pos = getEventPos(e, canvas);
-      if (textInputStateRef.current) { commitText(); }
-      if (toolRef.current === 'text') {
-        const fontSize = Math.max(12, widthRef.current * 4);
-        setTextInput({ x: pos.x, y: pos.y + fontSize, value: '' });
+      if (textStateRef.current) commitText();
+
+      if (toolRef.current === 'select') {
+        if (selectModeRef.current === 'selected') {
+          const selStrokes = strokesRef.current.filter(s => selectedIdsRef.current.has(s.id));
+          const bb = getStrokesBbox(selStrokes);
+          if (bboxContains(bb, pos)) {
+            // Start move: snapshot base without selected strokes
+            selectModeRef.current = 'moving'; setSelectMode('moving');
+            moveStartRef.current = pos;
+            const bCtx = baseCtx(); const bCanvas = baseRef.current;
+            if (bCtx && bCanvas) {
+              bCtx.fillStyle = '#ffffff'; bCtx.fillRect(0, 0, bCanvas.width, bCanvas.height);
+              strokesRef.current.filter(s => !selectedIdsRef.current.has(s.id)).forEach(s => renderStroke(bCtx, s));
+              preMoveRef.current = bCtx.getImageData(0, 0, bCanvas.width, bCanvas.height);
+            }
+            return;
+          }
+        }
+        // Start new selection rect
+        selectModeRef.current = 'selecting'; setSelectMode('selecting');
+        setSelected(new Set()); selStartRef.current = pos;
+        const oCtx = overlayCtx(); if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
         return;
       }
-      drawing.current = true;
-      startPt.current = pos;
-      activeStroke.current = {
-        id: uuid(), tool: toolRef.current,
-        color: colorRef.current, width: widthRef.current,
-        points: [pos], userId,
-      };
+
+      if (toolRef.current === 'text') {
+        const fs = Math.max(12, widthRef.current * 4);
+        setTextInput({ x: pos.x, y: pos.y + fs, value: '' });
+        return;
+      }
+
+      drawing.current = true; startPt.current = pos;
+      activeStroke.current = { id: uuid(), tool: toolRef.current, color: colorRef.current, width: widthRef.current, points: [pos], userId };
     };
 
     const move = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
       const pos = getEventPos(e, canvas);
       const now = Date.now();
-      if (now - lastCursorSend.current > 30) {
-        lastCursorSend.current = now;
-        sendCursorMove({ ...pos, userName });
+      if (now - cursorTimer.current > 30) { cursorTimer.current = now; sendCursorMove({ ...pos, userName }); }
+
+      if (toolRef.current === 'select') {
+        if (selectModeRef.current === 'selecting') {
+          const oCtx = overlayCtx();
+          if (oCtx) {
+            oCtx.clearRect(0, 0, canvas.width, canvas.height);
+            const rx = selStartRef.current.x, ry = selStartRef.current.y;
+            const rw = pos.x - rx, rh = pos.y - ry;
+            oCtx.save(); oCtx.strokeStyle = '#2563eb'; oCtx.lineWidth = 1;
+            oCtx.setLineDash([4, 3]); oCtx.fillStyle = 'rgba(37,99,235,0.05)';
+            oCtx.fillRect(rx, ry, rw, rh); oCtx.strokeRect(rx, ry, rw, rh);
+            oCtx.setLineDash([]); oCtx.restore();
+          }
+        } else if (selectModeRef.current === 'moving') {
+          const dx = pos.x - moveStartRef.current.x;
+          const dy = pos.y - moveStartRef.current.y;
+          const bCtx = baseCtx();
+          if (bCtx && preMoveRef.current) bCtx.putImageData(preMoveRef.current, 0, 0);
+          const oCtx = overlayCtx(); const ov = overlayRef.current;
+          if (oCtx && ov) {
+            oCtx.clearRect(0, 0, ov.width, ov.height);
+            const moved = strokesRef.current.filter(s => selectedIdsRef.current.has(s.id))
+              .map(s => ({ ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) }));
+            moved.forEach(s => renderStroke(oCtx, s));
+            const bb = getStrokesBbox(moved); if (bb) drawSelBox(oCtx, bb);
+          }
+        }
+        return;
       }
+
       if (!drawing.current || !activeStroke.current) return;
       const s = activeStroke.current;
-      if (s.tool === 'pen' || s.tool === 'eraser') {
-        s.points.push(pos);
-      } else {
-        s.points = [startPt.current, pos];
-      }
-      const ctx = overlayCtx();
-      if (ctx) { ctx.clearRect(0, 0, canvas.width, canvas.height); renderStroke(ctx, s); }
+      if (s.tool === 'pen' || s.tool === 'eraser') s.points.push(pos);
+      else s.points = [startPt.current, pos];
+      const oCtx = overlayCtx();
+      if (oCtx) { oCtx.clearRect(0, 0, canvas.width, canvas.height); renderStroke(oCtx, s); }
+    };
+
+    const commitMove = (pos: Point) => {
+      const dx = pos.x - moveStartRef.current.x;
+      const dy = pos.y - moveStartRef.current.y;
+      strokesRef.current = strokesRef.current.map(s =>
+        selectedIdsRef.current.has(s.id)
+          ? { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) } : s
+      );
+      preMoveRef.current = null;
+      redrawBase();
+      showSelOverlay();
+      if (dx !== 0 || dy !== 0) sendMoveStrokesRef.current({ ids: Array.from(selectedIdsRef.current), dx, dy });
+      selectModeRef.current = 'selected'; setSelectMode('selected');
     };
 
     const end = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
+      const pos = getEventPos(e, canvas);
+
+      if (toolRef.current === 'select') {
+        if (selectModeRef.current === 'selecting') {
+          const rx = selStartRef.current.x, ry = selStartRef.current.y;
+          const rw = pos.x - rx, rh = pos.y - ry;
+          const newSel = new Set(strokesRef.current.filter(s => strokeInRect(s, rx, ry, rw, rh)).map(s => s.id));
+          setSelected(newSel);
+          const oCtx = overlayCtx(); const ov = overlayRef.current;
+          if (oCtx && ov) {
+            oCtx.clearRect(0, 0, ov.width, ov.height);
+            if (newSel.size > 0) {
+              const bb = getStrokesBbox(strokesRef.current.filter(s => newSel.has(s.id)));
+              if (bb) drawSelBox(oCtx, bb);
+            }
+          }
+          selectModeRef.current = newSel.size > 0 ? 'selected' : 'idle';
+          setSelectMode(newSel.size > 0 ? 'selected' : 'idle');
+        } else if (selectModeRef.current === 'moving') {
+          commitMove(pos);
+        }
+        return;
+      }
+
       if (!drawing.current || !activeStroke.current) return;
       drawing.current = false;
-      const stroke = activeStroke.current;
-      activeStroke.current = null;
+      const stroke = activeStroke.current; activeStroke.current = null;
       strokesRef.current.push(stroke);
       const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke);
       const oCtx = overlayCtx(); if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
@@ -315,6 +461,19 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
 
     const leave = () => {
       sendCursorLeave();
+      if (toolRef.current === 'select') {
+        if (selectModeRef.current === 'moving') {
+          // Cancel move, restore
+          if (preMoveRef.current) { const bCtx = baseCtx(); if (bCtx) bCtx.putImageData(preMoveRef.current, 0, 0); preMoveRef.current = null; }
+          showSelOverlay();
+          selectModeRef.current = 'selected'; setSelectMode('selected');
+        } else if (selectModeRef.current === 'selecting') {
+          const oCtx = overlayCtx(); const ov = overlayRef.current;
+          if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
+          selectModeRef.current = 'idle'; setSelectMode('idle');
+        }
+        return;
+      }
       if (drawing.current && activeStroke.current) {
         drawing.current = false;
         const stroke = activeStroke.current; activeStroke.current = null;
@@ -332,7 +491,6 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     canvas.addEventListener('touchstart', start, { passive: false });
     canvas.addEventListener('touchmove',  move,  { passive: false });
     canvas.addEventListener('touchend',   end,   { passive: false });
-
     return () => {
       canvas.removeEventListener('mousedown',  start);
       canvas.removeEventListener('mousemove',  move);
@@ -342,15 +500,16 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       canvas.removeEventListener('touchmove',  move);
       canvas.removeEventListener('touchend',   end);
     };
-  }, [sendStroke, sendCursorMove, sendCursorLeave, commitText, userId, userName]);
+  }, [sendStroke, sendCursorMove, sendCursorLeave, commitText, userId, userName, redrawBase, setSelected, showSelOverlay]);
 
   const handleUndo = useCallback(() => {
-    const mine = strokesRef.current.filter((s) => s.userId === userId);
+    const mine = strokesRef.current.filter(s => s.userId === userId);
     if (mine.length === 0) return;
     const last = mine[mine.length - 1];
-    strokesRef.current = strokesRef.current.filter((s) => s.id !== last.id);
+    strokesRef.current = strokesRef.current.filter(s => s.id !== last.id);
+    if (selectedIdsRef.current.has(last.id)) { const next = new Set(selectedIdsRef.current); next.delete(last.id); setSelected(next); }
     redrawBase(); sendUndo(last.id);
-  }, [redrawBase, sendUndo, userId]);
+  }, [redrawBase, sendUndo, userId, setSelected]);
 
   const handleClear = useCallback(() => {
     if (!confirm('このページを全消去しますか？')) return;
@@ -358,47 +517,37 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   }, [sendClear]);
 
   const handleExport = useCallback(() => {
-    const base = baseRef.current; const overlay = overlayRef.current;
-    if (!base || !overlay) return;
-    const merged = document.createElement('canvas');
-    merged.width = base.width; merged.height = base.height;
-    const ctx = merged.getContext('2d')!;
-    ctx.drawImage(base, 0, 0); ctx.drawImage(overlay, 0, 0);
+    const base = baseRef.current; if (!base) return;
     const link = document.createElement('a');
     link.download = `whiteboard-${roomId}.png`;
-    link.href = merged.toDataURL('image/png'); link.click();
+    link.href = base.toDataURL('image/png'); link.click();
   }, [roomId]);
 
-  const handleChatToggle = () => {
-    setChatOpen((v) => !v);
-    setUnread(0);
-  };
+  const handleChatToggle = () => { setChatOpen(v => !v); setUnread(0); };
 
   const handleSendChat = useCallback((text: string) => {
     const id = uuid();
-    const localMsg: ChatMessage = { id, userName, text, timestamp: Date.now() };
-    setChatMessages((prev) => [...prev, localMsg]);
+    setChatMessages(prev => [...prev, { id, userName, text, timestamp: Date.now() }]);
     sendChatMessage({ id, userName, text });
   }, [userName, sendChatMessage]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
-    setCurrentTabId(tabId);
-    strokesRef.current = [];
-    setCursors({});
-    redrawBase();
-    sendSwitchTab(tabId);
-  }, [redrawBase, sendSwitchTab]);
+    setCurrentTabId(tabId); setSelected(new Set()); setSelMode('idle');
+    strokesRef.current = []; setCursors({}); redrawBase(); sendSwitchTab(tabId);
+  }, [redrawBase, sendSwitchTab, setSelected, setSelMode]);
 
-  const handleCreateTab = useCallback(() => {
-    sendCreateTab();
-  }, [sendCreateTab]);
+  const handleCreateTab = useCallback(() => sendCreateTab(), [sendCreateTab]);
 
   const handleDeleteTab = useCallback((tabId: string) => {
     if (!confirm('このページを削除しますか？元に戻せません。')) return;
     sendDeleteTab(tabId);
   }, [sendDeleteTab]);
 
-  const cursor = tool === 'text' ? 'text' : tool === 'eraser' ? 'cell' : 'crosshair';
+  const cursor = tool === 'text' ? 'text'
+    : tool === 'eraser' ? 'cell'
+    : tool === 'select' ? (selectMode === 'moving' ? 'grabbing' : 'crosshair')
+    : 'crosshair';
+
   const fontSize = Math.max(12, width * 4);
 
   return (
@@ -410,69 +559,68 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
         onClear={handleClear} onUndo={handleUndo} onExport={handleExport}
         onChatToggle={handleChatToggle} onLeave={onLeave}
       />
-      <TabBar
-        tabs={tabs}
-        currentTabId={currentTabId}
-        userTabs={userTabs}
-        mySocketId={mySocketId}
-        onSwitch={handleSwitchTab}
-        onCreate={handleCreateTab}
-        onDelete={handleDeleteTab}
-      />
+      <TabBar tabs={tabs} currentTabId={currentTabId} userTabs={userTabs} mySocketId={mySocketId}
+        onSwitch={handleSwitchTab} onCreate={handleCreateTab} onDelete={handleDeleteTab} />
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#fff' }}>
         <canvas ref={baseRef}    style={{ position: 'absolute', inset: 0 }} />
         <canvas ref={overlayRef} style={{ position: 'absolute', inset: 0, cursor }} />
 
-        {textInput && (
-          <input
-            autoFocus
-            value={textInput.value}
-            onChange={(e) => setTextInput({ ...textInput, value: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') { e.preventDefault(); commitText(); }
-              if (e.key === 'Escape') { setTextInput(null); }
-            }}
-            onBlur={commitText}
-            style={{
-              position: 'absolute',
-              left: textInput.x,
-              top: textInput.y - fontSize,
-              fontSize,
-              fontFamily: 'system-ui, sans-serif',
-              color: color,
-              background: 'transparent',
-              border: '1px dashed #94a3b8',
-              outline: 'none',
-              minWidth: 120,
-              zIndex: 25,
-              padding: '0 2px',
-            }}
-          />
+        {/* Selection hint */}
+        {tool === 'select' && selectedIds.size > 0 && (
+          <div style={{ position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)', background: 'rgba(37,99,235,0.85)', color: '#fff', fontSize: 12, padding: '3px 10px', borderRadius: 12, pointerEvents: 'none', zIndex: 10 }}>
+            {selectedIds.size} 個選択中 — ドラッグで移動 / Esc で解除
+          </div>
         )}
 
+        {/* Text input overlay */}
+        {textInput && (
+          <div style={{ position: 'absolute', left: textInput.x, top: textInput.y - fontSize, zIndex: 25 }}>
+            <textarea
+              autoFocus
+              value={textInput.value}
+              onChange={e => setTextInput({ ...textInput, value: e.target.value })}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); commitText(); }
+                if (e.key === 'Escape') { setTextInput(null); }
+              }}
+              rows={3}
+              style={{
+                display: 'block', fontSize, lineHeight: `${fontSize * 1.3}px`,
+                fontFamily: 'system-ui, sans-serif', color,
+                background: 'rgba(255,255,255,0.9)', border: '1px dashed #94a3b8',
+                outline: 'none', resize: 'both', padding: '2px 4px', borderRadius: 3,
+                minWidth: 140,
+              }}
+            />
+            <div style={{ display: 'flex', gap: 4, marginTop: 3 }}>
+              <button onMouseDown={e => e.preventDefault()} onClick={commitText}
+                style={{ padding: '2px 10px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+                確定
+              </button>
+              <button onMouseDown={e => e.preventDefault()} onClick={() => setTextInput(null)}
+                style={{ padding: '2px 8px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+                キャンセル
+              </button>
+              <span style={{ fontSize: 11, color: '#94a3b8', alignSelf: 'center' }}>Shift+Enter で確定</span>
+            </div>
+          </div>
+        )}
+
+        {/* Remote cursors */}
         {Object.entries(cursors).map(([uid, cur]) => (
           <div key={uid} style={{ position: 'absolute', left: cur.x, top: cur.y, pointerEvents: 'none', zIndex: 20 }}>
             <svg width="20" height="20" viewBox="0 0 20 20" style={{ display: 'block' }}>
               <path d="M4 2 L4 16 L7.5 12.5 L10.5 18.5 L12.5 17.5 L9.5 11 L14 11 Z"
                 fill={cur.color} stroke="white" strokeWidth="1.5" strokeLinejoin="round" />
             </svg>
-            <span style={{
-              display: 'inline-block', background: cur.color, color: '#fff',
-              fontSize: 11, fontWeight: 600, padding: '1px 5px', borderRadius: 4,
-              marginTop: 2, whiteSpace: 'nowrap', fontFamily: 'system-ui, sans-serif',
-            }}>
+            <span style={{ display: 'inline-block', background: cur.color, color: '#fff', fontSize: 11, fontWeight: 600, padding: '1px 5px', borderRadius: 4, marginTop: 2, whiteSpace: 'nowrap', fontFamily: 'system-ui, sans-serif' }}>
               {cur.userName}
             </span>
           </div>
         ))}
 
         {chatOpen && (
-          <ChatPanel
-            messages={chatMessages}
-            userName={userName}
-            onSend={handleSendChat}
-            onClose={handleChatToggle}
-          />
+          <ChatPanel messages={chatMessages} userName={userName} onSend={handleSendChat} onClose={handleChatToggle} />
         )}
       </div>
     </div>
