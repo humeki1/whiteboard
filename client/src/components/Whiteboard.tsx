@@ -224,14 +224,33 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     });
   }, []);
 
+  const onTabDeleted = useCallback((deletedTabId: string) => {
+    setTabs((prev) => prev.filter((t) => t.id !== deletedTabId));
+    if (currentTabId === deletedTabId) {
+      const remaining = tabs.filter((t) => t.id !== deletedTabId);
+      if (remaining.length > 0) {
+        const next = remaining[0];
+        setCurrentTabId(next.id);
+        strokesRef.current = [];
+        setCursors({});
+        redrawBase();
+        sendSwitchTabRef.current(next.id);
+      }
+    }
+  }, [currentTabId, tabs, redrawBase]);
+
+  const sendSwitchTabRef = useRef<(id: string) => void>(() => {});
+
   const {
     sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave,
-    sendChatMessage, sendSwitchTab, sendCreateTab,
+    sendChatMessage, sendSwitchTab, sendCreateTab, sendDeleteTab,
   } = useSocket(roomId, userName, {
     onInitRoom, onInitTab, onStroke, onClear, onUndo,
-    onUserCount: setUserCount, onTabCreated, onUserTabUpdate,
+    onUserCount: setUserCount, onTabCreated, onTabDeleted, onUserTabUpdate,
     onUserLeft, onCursorMove, onCursorLeave, onChatMessage,
   });
+
+  sendSwitchTabRef.current = sendSwitchTab;
 
   sendStrokeRef.current = sendStroke;
 
@@ -374,6 +393,11 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     sendCreateTab();
   }, [sendCreateTab]);
 
+  const handleDeleteTab = useCallback((tabId: string) => {
+    if (!confirm('このページを削除しますか？元に戻せません。')) return;
+    sendDeleteTab(tabId);
+  }, [sendDeleteTab]);
+
   const cursor = tool === 'text' ? 'text' : tool === 'eraser' ? 'cell' : 'crosshair';
   const fontSize = Math.max(12, width * 4);
 
@@ -393,6 +417,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
         mySocketId={mySocketId}
         onSwitch={handleSwitchTab}
         onCreate={handleCreateTab}
+        onDelete={handleDeleteTab}
       />
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#fff' }}>
         <canvas ref={baseRef}    style={{ position: 'absolute', inset: 0 }} />

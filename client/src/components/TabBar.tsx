@@ -13,9 +13,10 @@ interface Props {
   mySocketId: string;
   onSwitch: (tabId: string) => void;
   onCreate: () => void;
+  onDelete: (tabId: string) => void;
 }
 
-export default function TabBar({ tabs, currentTabId, userTabs, mySocketId, onSwitch, onCreate }: Props) {
+export default function TabBar({ tabs, currentTabId, userTabs, mySocketId, onSwitch, onCreate, onDelete }: Props) {
   const usersByTab: Record<string, UserTabInfo[]> = {};
   for (const u of userTabs) {
     if (!usersByTab[u.tabId]) usersByTab[u.tabId] = [];
@@ -57,6 +58,15 @@ export default function TabBar({ tabs, currentTabId, userTabs, mySocketId, onSwi
                 )}
               </div>
             )}
+            {tabs.length > 1 && (
+              <span
+                onClick={(e) => { e.stopPropagation(); onDelete(tab.id); }}
+                title="このページを削除"
+                style={deleteX}
+              >
+                ×
+              </span>
+            )}
           </button>
         );
       })}
@@ -92,6 +102,17 @@ const tabBtn = (active: boolean): React.CSSProperties => ({
   fontFamily: 'system-ui, sans-serif',
   marginBottom: -1,
 });
+
+const deleteX: React.CSSProperties = {
+  marginLeft: 4,
+  fontSize: 12,
+  lineHeight: 1,
+  color: '#94a3b8',
+  padding: '1px 3px',
+  borderRadius: 3,
+  cursor: 'pointer',
+  flexShrink: 0,
+};
 
 const addBtn: React.CSSProperties = {
   width: 26, height: 26,

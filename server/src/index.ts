@@ -121,6 +121,14 @@ io.on('connection', (socket) => {
     io.to(currentRoomId).emit('tab-created', { id: tab.id, name: tab.name });
   });
 
+  socket.on('delete-tab', (tabId: string) => {
+    if (!currentRoomId) return;
+    const room = getRoom(currentRoomId);
+    if (room.tabs.length <= 1) return;
+    room.tabs = room.tabs.filter((t) => t.id !== tabId);
+    io.to(currentRoomId).emit('tab-deleted', tabId);
+  });
+
   socket.on('stroke', (stroke: Stroke) => {
     if (!currentRoomId || !currentTabId) return;
     const room = getRoom(currentRoomId);

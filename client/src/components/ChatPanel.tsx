@@ -64,11 +64,14 @@ export default function ChatPanel({ messages, userName, onSend, onClose }: Props
 
       {/* Input */}
       <div style={inputArea}>
-        <input
+        <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && send()}
-          placeholder="メッセージを入力..."
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); send(); }
+          }}
+          placeholder={'メッセージを入力...\n(Shift+Enter で送信)'}
+          rows={2}
           style={inputStyle}
         />
         <button onClick={send} disabled={!input.trim()} style={sendBtn}>
@@ -143,10 +146,13 @@ const inputStyle: React.CSSProperties = {
   flex: 1,
   padding: '8px 10px',
   border: '1px solid #e2e8f0',
-  borderRadius: 20,
+  borderRadius: 12,
   fontSize: 13,
   outline: 'none',
   background: '#fff',
+  resize: 'none',
+  fontFamily: 'system-ui, sans-serif',
+  lineHeight: 1.4,
 };
 
 const sendBtn: React.CSSProperties = {

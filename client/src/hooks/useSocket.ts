@@ -12,6 +12,7 @@ type Callbacks = {
   onUndo: (strokeId: string) => void;
   onUserCount: (count: number) => void;
   onTabCreated: (tab: TabInfo) => void;
+  onTabDeleted: (tabId: string) => void;
   onUserTabUpdate: (data: UserTabInfo) => void;
   onUserLeft: (userId: string) => void;
   onCursorMove: (data: { userId: string; userName: string; x: number; y: number }) => void;
@@ -36,6 +37,7 @@ export function useSocket(roomId: string, userName: string, callbacks: Callbacks
     socket.on('undo',            (id: string)                 => cbRef.current.onUndo(id));
     socket.on('user-count',      (n: number)                  => cbRef.current.onUserCount(n));
     socket.on('tab-created',     (tab: TabInfo)               => cbRef.current.onTabCreated(tab));
+    socket.on('tab-deleted',     (tabId: string)              => cbRef.current.onTabDeleted(tabId));
     socket.on('user-tab-update', (data: UserTabInfo)          => cbRef.current.onUserTabUpdate(data));
     socket.on('user-left',       (userId: string)             => cbRef.current.onUserLeft(userId));
     socket.on('cursor-move',     (data: { userId: string; userName: string; x: number; y: number }) => cbRef.current.onCursorMove(data));
@@ -77,5 +79,9 @@ export function useSocket(roomId: string, userName: string, callbacks: Callbacks
     socketRef.current?.emit('create-tab');
   }, []);
 
-  return { sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave, sendChatMessage, sendSwitchTab, sendCreateTab };
+  const sendDeleteTab = useCallback((tabId: string) => {
+    socketRef.current?.emit('delete-tab', tabId);
+  }, []);
+
+  return { sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave, sendChatMessage, sendSwitchTab, sendCreateTab, sendDeleteTab };
 }
