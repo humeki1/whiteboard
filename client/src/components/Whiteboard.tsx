@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { v4 as uuid } from 'uuid';
-import { Tool, Point, Stroke, ChatMessage } from '../types';
+import { Tool, Point, Stroke, ChatMessage, TabInfo, UserTabInfo, InitRoomData } from '../types';
 import Toolbar from './Toolbar';
+import TabBar from './TabBar';
 import ChatPanel from './ChatPanel';
 import { useSocket } from '../hooks/useSocket';
 
@@ -97,7 +98,11 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const [unread, setUnread]       = useState(0);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
-  // Text input overlay state: both ref (for event handlers) and state (for rendering)
+  const [tabs, setTabs]                 = useState<TabInfo[]>([]);
+  const [currentTabId, setCurrentTabId] = useState<string>('');
+  const [userTabs, setUserTabs]         = useState<UserTabInfo[]>([]);
+  const [mySocketId, setMySocketId]     = useState<string>('');
+
   const textInputStateRef = useRef<TextInput | null>(null);
   const [textInput, setTextInputRaw] = useState<TextInput | null>(null);
   const setTextInput = (val: TextInput | null) => {
@@ -144,7 +149,6 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     redrawBase();
   }, [redrawBase]);
 
-  // Text commit (reads from ref, safe to call from event handlers and effects)
   const commitText = useCallback(() => {
     const ti = textInputStateRef.current;
     setTextInput(null);
@@ -161,12 +165,21 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     sendStrokeRef.current(stroke);
   }, [userId]);
 
-  // Stable ref to sendStroke so commitText doesn't need it as a dep
   const sendStrokeRef = useRef<(s: Stroke) => void>(() => {});
 
-  // Socket callbacks
-  const onInit = useCallback((strokes: Stroke[]) => {
-    strokesRef.current = strokes; redrawBase();
+  const onInitRoom = useCallback((data: InitRoomData) => {
+    setMySocketId(data.socketId);
+    setTabs(data.tabs);
+    setCurrentTabId(data.currentTabId);
+    setUserTabs(data.userTabs);
+    strokesRef.current = data.strokes;
+    redrawBase();
+  }, [redrawBase]);
+
+  const onInitTab = useCallback((strokes: Stroke[]) => {
+    strokesRef.current = strokes;
+    setCursors({});
+    redrawBase();
   }, [redrawBase]);
 
   const onStroke = useCallback((stroke: Stroke) => {
@@ -181,6 +194,19 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const onUndo = useCallback((strokeId: string) => {
     strokesRef.current = strokesRef.current.filter((s) => s.id !== strokeId); redrawBase();
   }, [redrawBase]);
+
+  const onTabCreated = useCallback((tab: TabInfo) => {
+    setTabs((prev) => [...prev, tab]);
+  }, []);
+
+  const onUserTabUpdate = useCallback((data: UserTabInfo) => {
+    setUserTabs((prev) => [...prev.filter((u) => u.userId !== data.userId), data]);
+  }, []);
+
+  const onUserLeft = useCallback((uid: string) => {
+    setUserTabs((prev) => prev.filter((u) => u.userId !== uid));
+    setCursors((prev) => { const next = { ...prev }; delete next[uid]; return next; });
+  }, []);
 
   const onCursorMove = useCallback(({ userId: uid, userName: uName, x, y }: { userId: string; userName: string; x: number; y: number }) => {
     setCursors((prev) => ({ ...prev, [uid]: { x, y, color: userColor(uid), userName: uName } }));
@@ -198,10 +224,15 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     });
   }, []);
 
-  const { sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave, sendChatMessage } =
-    useSocket(roomId, { onInit, onStroke, onClear, onUndo, onUserCount: setUserCount, onCursorMove, onCursorLeave, onChatMessage });
+  const {
+    sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave,
+    sendChatMessage, sendSwitchTab, sendCreateTab,
+  } = useSocket(roomId, userName, {
+    onInitRoom, onInitTab, onStroke, onClear, onUndo,
+    onUserCount: setUserCount, onTabCreated, onUserTabUpdate,
+    onUserLeft, onCursorMove, onCursorLeave, onChatMessage,
+  });
 
-  // Keep sendStrokeRef current
   sendStrokeRef.current = sendStroke;
 
   useEffect(() => {
@@ -217,16 +248,12 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     const start = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
       const pos = getEventPos(e, canvas);
-
-      // Commit active text input first
       if (textInputStateRef.current) { commitText(); }
-
       if (toolRef.current === 'text') {
         const fontSize = Math.max(12, widthRef.current * 4);
         setTextInput({ x: pos.x, y: pos.y + fontSize, value: '' });
         return;
       }
-
       drawing.current = true;
       startPt.current = pos;
       activeStroke.current = {
@@ -239,13 +266,11 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     const move = (e: MouseEvent | TouchEvent) => {
       e.preventDefault();
       const pos = getEventPos(e, canvas);
-
       const now = Date.now();
       if (now - lastCursorSend.current > 30) {
         lastCursorSend.current = now;
         sendCursorMove({ ...pos, userName });
       }
-
       if (!drawing.current || !activeStroke.current) return;
       const s = activeStroke.current;
       if (s.tool === 'pen' || s.tool === 'eraser') {
@@ -309,7 +334,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   }, [redrawBase, sendUndo, userId]);
 
   const handleClear = useCallback(() => {
-    if (!confirm('ボードを全消去しますか？')) return;
+    if (!confirm('このページを全消去しますか？')) return;
     sendClear();
   }, [sendClear]);
 
@@ -331,10 +356,23 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   };
 
   const handleSendChat = useCallback((text: string) => {
-    const msg: ChatMessage = { id: uuid(), userName, text, timestamp: Date.now() };
-    setChatMessages((prev) => [...prev, msg]);
-    sendChatMessage({ id: msg.id, userName, text });
+    const id = uuid();
+    const localMsg: ChatMessage = { id, userName, text, timestamp: Date.now() };
+    setChatMessages((prev) => [...prev, localMsg]);
+    sendChatMessage({ id, userName, text });
   }, [userName, sendChatMessage]);
+
+  const handleSwitchTab = useCallback((tabId: string) => {
+    setCurrentTabId(tabId);
+    strokesRef.current = [];
+    setCursors({});
+    redrawBase();
+    sendSwitchTab(tabId);
+  }, [redrawBase, sendSwitchTab]);
+
+  const handleCreateTab = useCallback(() => {
+    sendCreateTab();
+  }, [sendCreateTab]);
 
   const cursor = tool === 'text' ? 'text' : tool === 'eraser' ? 'cell' : 'crosshair';
   const fontSize = Math.max(12, width * 4);
@@ -348,11 +386,18 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
         onClear={handleClear} onUndo={handleUndo} onExport={handleExport}
         onChatToggle={handleChatToggle} onLeave={onLeave}
       />
+      <TabBar
+        tabs={tabs}
+        currentTabId={currentTabId}
+        userTabs={userTabs}
+        mySocketId={mySocketId}
+        onSwitch={handleSwitchTab}
+        onCreate={handleCreateTab}
+      />
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#fff' }}>
         <canvas ref={baseRef}    style={{ position: 'absolute', inset: 0 }} />
         <canvas ref={overlayRef} style={{ position: 'absolute', inset: 0, cursor }} />
 
-        {/* テキスト入力オーバーレイ */}
         {textInput && (
           <input
             autoFocus
@@ -380,7 +425,6 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
           />
         )}
 
-        {/* 他ユーザーのカーソル */}
         {Object.entries(cursors).map(([uid, cur]) => (
           <div key={uid} style={{ position: 'absolute', left: cur.x, top: cur.y, pointerEvents: 'none', zIndex: 20 }}>
             <svg width="20" height="20" viewBox="0 0 20 20" style={{ display: 'block' }}>
@@ -397,7 +441,6 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
           </div>
         ))}
 
-        {/* チャットパネル */}
         {chatOpen && (
           <ChatPanel
             messages={chatMessages}

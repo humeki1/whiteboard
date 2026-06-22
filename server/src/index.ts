@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import { randomUUID } from 'crypto';
 
 const app = express();
 app.use(cors());
@@ -14,34 +15,35 @@ const io = new Server(httpServer, {
   },
 });
 
-type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle';
+type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle' | 'text';
 
-interface Point {
-  x: number;
-  y: number;
-}
-
+interface Point { x: number; y: number; }
 interface Stroke {
-  id: string;
-  tool: Tool;
-  color: string;
-  width: number;
-  points: Point[];
-  userId: string;
+  id: string; tool: Tool; color: string; width: number;
+  points: Point[]; userId: string; text?: string;
 }
-
-interface Room {
-  strokes: Stroke[];
-  users: Set<string>;
-}
+interface Tab { id: string; name: string; strokes: Stroke[]; }
+interface RoomUser { userName: string; tabId: string; }
+interface Room { tabs: Tab[]; users: Map<string, RoomUser>; }
 
 const rooms = new Map<string, Room>();
 
 function getRoom(roomId: string): Room {
   if (!rooms.has(roomId)) {
-    rooms.set(roomId, { strokes: [], users: new Set() });
+    const firstTab: Tab = { id: randomUUID(), name: 'ページ 1', strokes: [] };
+    rooms.set(roomId, { tabs: [firstTab], users: new Map() });
   }
   return rooms.get(roomId)!;
+}
+
+function tabRoomId(roomId: string, tabId: string) {
+  return `${roomId}:${tabId}`;
+}
+
+function getUserTabs(room: Room) {
+  return Array.from(room.users.entries()).map(([userId, info]) => ({
+    userId, userName: info.userName, tabId: info.tabId,
+  }));
 }
 
 app.get('/health', (_req, res) => {
@@ -49,65 +51,127 @@ app.get('/health', (_req, res) => {
 });
 
 io.on('connection', (socket) => {
-  let currentRoom: string | null = null;
+  let currentRoomId: string | null = null;
+  let currentTabId: string | null = null;
 
-  socket.on('join-room', (roomId: string) => {
-    if (currentRoom) {
-      socket.leave(currentRoom);
-      getRoom(currentRoom).users.delete(socket.id);
-      io.to(currentRoom).emit('user-count', getRoom(currentRoom).users.size);
+  socket.on('join-room', ({ roomId, userName }: { roomId: string; userName: string }) => {
+    if (currentRoomId) {
+      socket.leave(currentRoomId);
+      if (currentTabId) socket.leave(tabRoomId(currentRoomId, currentTabId));
+      const prevRoom = getRoom(currentRoomId);
+      prevRoom.users.delete(socket.id);
+      io.to(currentRoomId).emit('user-count', prevRoom.users.size);
+      io.to(currentRoomId).emit('user-left', socket.id);
     }
 
-    currentRoom = roomId;
-    socket.join(roomId);
+    currentRoomId = roomId;
     const room = getRoom(roomId);
-    room.users.add(socket.id);
+    const firstTab = room.tabs[0];
+    currentTabId = firstTab.id;
 
-    socket.emit('init', room.strokes);
+    socket.join(roomId);
+    socket.join(tabRoomId(roomId, currentTabId));
+    room.users.set(socket.id, { userName, tabId: currentTabId });
+
+    socket.emit('init-room', {
+      tabs: room.tabs.map((t) => ({ id: t.id, name: t.name })),
+      currentTabId,
+      strokes: firstTab.strokes,
+      userTabs: getUserTabs(room),
+      socketId: socket.id,
+    });
+
     io.to(roomId).emit('user-count', room.users.size);
+    socket.to(roomId).emit('user-tab-update', {
+      userId: socket.id, userName, tabId: currentTabId,
+    });
+  });
+
+  socket.on('switch-tab', (tabId: string) => {
+    if (!currentRoomId) return;
+    const room = getRoom(currentRoomId);
+    const tab = room.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    if (currentTabId) {
+      socket.to(tabRoomId(currentRoomId, currentTabId)).emit('cursor-leave', socket.id);
+      socket.leave(tabRoomId(currentRoomId, currentTabId));
+    }
+    currentTabId = tabId;
+    socket.join(tabRoomId(currentRoomId, currentTabId));
+
+    const userInfo = room.users.get(socket.id);
+    if (userInfo) userInfo.tabId = tabId;
+
+    socket.emit('init-tab', tab.strokes);
+    io.to(currentRoomId).emit('user-tab-update', {
+      userId: socket.id, userName: userInfo?.userName ?? '', tabId,
+    });
+  });
+
+  socket.on('create-tab', () => {
+    if (!currentRoomId) return;
+    const room = getRoom(currentRoomId);
+    const tab: Tab = {
+      id: randomUUID(),
+      name: `ページ ${room.tabs.length + 1}`,
+      strokes: [],
+    };
+    room.tabs.push(tab);
+    io.to(currentRoomId).emit('tab-created', { id: tab.id, name: tab.name });
   });
 
   socket.on('stroke', (stroke: Stroke) => {
-    if (!currentRoom) return;
-    const room = getRoom(currentRoom);
-    room.strokes.push(stroke);
-    socket.to(currentRoom).emit('stroke', stroke);
+    if (!currentRoomId || !currentTabId) return;
+    const room = getRoom(currentRoomId);
+    const tab = room.tabs.find((t) => t.id === currentTabId);
+    if (tab) tab.strokes.push(stroke);
+    socket.to(tabRoomId(currentRoomId, currentTabId)).emit('stroke', stroke);
   });
 
   socket.on('clear', () => {
-    if (!currentRoom) return;
-    getRoom(currentRoom).strokes = [];
-    io.to(currentRoom).emit('clear');
+    if (!currentRoomId || !currentTabId) return;
+    const room = getRoom(currentRoomId);
+    const tab = room.tabs.find((t) => t.id === currentTabId);
+    if (tab) tab.strokes = [];
+    io.to(tabRoomId(currentRoomId, currentTabId)).emit('clear');
   });
 
   socket.on('undo', (strokeId: string) => {
-    if (!currentRoom) return;
-    const room = getRoom(currentRoom);
-    room.strokes = room.strokes.filter((s) => s.id !== strokeId);
-    io.to(currentRoom).emit('undo', strokeId);
+    if (!currentRoomId || !currentTabId) return;
+    const room = getRoom(currentRoomId);
+    const tab = room.tabs.find((t) => t.id === currentTabId);
+    if (tab) tab.strokes = tab.strokes.filter((s) => s.id !== strokeId);
+    io.to(tabRoomId(currentRoomId, currentTabId)).emit('undo', strokeId);
   });
 
   socket.on('chat-message', (data: { id: string; userName: string; text: string }) => {
-    if (!currentRoom) return;
-    io.to(currentRoom).emit('chat-message', { ...data, timestamp: Date.now() });
+    if (!currentRoomId) return;
+    // socket.to (not io.to): excludes sender — client adds message locally to avoid duplicate
+    socket.to(currentRoomId).emit('chat-message', { ...data, timestamp: Date.now() });
   });
 
   socket.on('cursor-move', (data: { x: number; y: number; userName: string }) => {
-    if (!currentRoom) return;
-    socket.to(currentRoom).emit('cursor-move', { userId: socket.id, userName: data.userName, x: data.x, y: data.y });
+    if (!currentRoomId || !currentTabId) return;
+    socket.to(tabRoomId(currentRoomId, currentTabId)).emit('cursor-move', {
+      userId: socket.id, userName: data.userName, x: data.x, y: data.y,
+    });
   });
 
   socket.on('cursor-leave', () => {
-    if (!currentRoom) return;
-    socket.to(currentRoom).emit('cursor-leave', socket.id);
+    if (!currentRoomId || !currentTabId) return;
+    socket.to(tabRoomId(currentRoomId, currentTabId)).emit('cursor-leave', socket.id);
   });
 
   socket.on('disconnect', () => {
-    if (!currentRoom) return;
-    const room = getRoom(currentRoom);
+    if (!currentRoomId) return;
+    const room = getRoom(currentRoomId);
     room.users.delete(socket.id);
-    io.to(currentRoom).emit('user-count', room.users.size);
-    io.to(currentRoom).emit('cursor-leave', socket.id);
+    if (currentTabId) {
+      io.to(tabRoomId(currentRoomId, currentTabId)).emit('cursor-leave', socket.id);
+    }
+    io.to(currentRoomId).emit('user-count', room.users.size);
+    io.to(currentRoomId).emit('user-left', socket.id);
   });
 });
 

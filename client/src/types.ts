@@ -21,3 +21,22 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
 }
+
+export interface TabInfo {
+  id: string;
+  name: string;
+}
+
+export interface UserTabInfo {
+  userId: string;
+  userName: string;
+  tabId: string;
+}
+
+export interface InitRoomData {
+  tabs: TabInfo[];
+  currentTabId: string;
+  strokes: Stroke[];
+  userTabs: UserTabInfo[];
+  socketId: string;
+}
