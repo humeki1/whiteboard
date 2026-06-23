@@ -9,13 +9,88 @@ import { useSocket } from '../hooks/useSocket';
 interface Props { roomId: string; userName: string; onLeave: () => void; }
 interface RemoteCursor { x: number; y: number; color: string; userName: string; }
 interface TextInputState { x: number; y: number; value: string; }
-type SelectMode = 'idle' | 'selecting' | 'selected' | 'moving';
-type UndoEntry = { type: 'stroke'; id: string } | { type: 'move'; ids: string[]; dx: number; dy: number };
+type SelectMode = 'idle' | 'selecting' | 'selected' | 'moving' | 'resizing';
+type UndoEntry =
+  | { type: 'stroke'; id: string }
+  | { type: 'move'; ids: string[]; dx: number; dy: number }
+  | { type: 'resize'; origStrokes: Array<{ id: string; points: Point[]; width: number }> };
 
 function userColor(id: string): string {
   let h = 0;
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
   return `hsl(${h % 360}, 75%, 48%)`;
+}
+
+const SEL_PAD = 6;
+const RESIZE_HIT = 8;
+const RESIZE_HANDLE_SIZE = 10;
+const RESIZE_CURSOR: Record<string, string> = { nw: 'nw-resize', ne: 'ne-resize', sw: 'sw-resize', se: 'se-resize' };
+type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se';
+type Bbox = { minX: number; minY: number; maxX: number; maxY: number };
+
+function drawResizeHandles(ctx: CanvasRenderingContext2D, b: Bbox) {
+  const H = RESIZE_HANDLE_SIZE / 2;
+  const corners = [
+    { x: b.minX - SEL_PAD, y: b.minY - SEL_PAD },
+    { x: b.maxX + SEL_PAD, y: b.minY - SEL_PAD },
+    { x: b.minX - SEL_PAD, y: b.maxY + SEL_PAD },
+    { x: b.maxX + SEL_PAD, y: b.maxY + SEL_PAD },
+  ];
+  ctx.save();
+  ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5;
+  corners.forEach(c => {
+    ctx.beginPath(); ctx.rect(c.x - H, c.y - H, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
+    ctx.fill(); ctx.stroke();
+  });
+  ctx.restore();
+}
+
+function getResizeHandle(b: Bbox, pos: Point): ResizeHandle | null {
+  const corners: Array<[ResizeHandle, number, number]> = [
+    ['nw', b.minX - SEL_PAD, b.minY - SEL_PAD],
+    ['ne', b.maxX + SEL_PAD, b.minY - SEL_PAD],
+    ['sw', b.minX - SEL_PAD, b.maxY + SEL_PAD],
+    ['se', b.maxX + SEL_PAD, b.maxY + SEL_PAD],
+  ];
+  for (const [id, cx, cy] of corners) {
+    if (Math.abs(pos.x - cx) <= RESIZE_HIT && Math.abs(pos.y - cy) <= RESIZE_HIT) return id;
+  }
+  return null;
+}
+
+function computeResizeBbox(orig: Bbox, handle: ResizeHandle, pos: Point): Bbox {
+  const P = SEL_PAD, MIN = 20;
+  let minX: number, minY: number, maxX: number, maxY: number;
+  if      (handle === 'nw') { minX = pos.x + P; minY = pos.y + P; maxX = orig.maxX;   maxY = orig.maxY; }
+  else if (handle === 'ne') { minX = orig.minX;  minY = pos.y + P; maxX = pos.x - P;   maxY = orig.maxY; }
+  else if (handle === 'sw') { minX = pos.x + P;  minY = orig.minY; maxX = orig.maxX;   maxY = pos.y - P; }
+  else                      { minX = orig.minX;  minY = orig.minY; maxX = pos.x - P;   maxY = pos.y - P; }
+  if (maxX - minX < MIN) { if (handle === 'nw' || handle === 'sw') minX = maxX - MIN; else maxX = minX + MIN; }
+  if (maxY - minY < MIN) { if (handle === 'nw' || handle === 'ne') minY = maxY - MIN; else maxY = minY + MIN; }
+  return { minX, minY, maxX, maxY };
+}
+
+function scalePoint(p: Point, orig: Bbox, next: Bbox): Point {
+  const ow = orig.maxX - orig.minX, oh = orig.maxY - orig.minY;
+  const nw = next.maxX - next.minX, nh = next.maxY - next.minY;
+  return {
+    x: ow < 1 ? next.minX : next.minX + (p.x - orig.minX) / ow * nw,
+    y: oh < 1 ? next.minY : next.minY + (p.y - orig.minY) / oh * nh,
+  };
+}
+
+function scaleStroke(s: Stroke, orig: Bbox, next: Bbox): Stroke {
+  if (s.tool === 'image' && s.points.length >= 2) {
+    const newPos = scalePoint(s.points[0], orig, next);
+    const br = scalePoint({ x: s.points[0].x + s.points[1].x, y: s.points[0].y + s.points[1].y }, orig, next);
+    return { ...s, points: [newPos, { x: Math.max(10, br.x - newPos.x), y: Math.max(10, br.y - newPos.y) }] };
+  }
+  if (s.tool === 'text') {
+    const oh = orig.maxY - orig.minY, nh = next.maxY - next.minY;
+    const ratio = oh < 1 ? 1 : nh / oh;
+    return { ...s, points: [scalePoint(s.points[0], orig, next)], width: Math.max(1, Math.round(s.width * ratio)) };
+  }
+  return { ...s, points: s.points.map(p => scalePoint(p, orig, next)) };
 }
 
 function compressImageFile(file: File, maxW = 900, maxH = 700): Promise<string> {
@@ -75,7 +150,7 @@ function strokeInRect(s: Stroke, rx: number, ry: number, rw: number, rh: number)
 }
 
 function drawSelBox(ctx: CanvasRenderingContext2D, b: NonNullable<ReturnType<typeof getStrokesBbox>>) {
-  const p = 6;
+  const p = SEL_PAD;
   ctx.save();
   ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5;
   ctx.setLineDash([5, 3]);
@@ -165,6 +240,11 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const preMoveRef     = useRef<ImageData | null>(null);
   const undoStackRef   = useRef<UndoEntry[]>([]);
   const imageCacheRef  = useRef<Map<string, HTMLImageElement>>(new Map());
+  const resizeHandleRef      = useRef<ResizeHandle>('se');
+  const resizeOrigBboxRef    = useRef<Bbox | null>(null);
+  const resizeOrigStrokesRef = useRef<Stroke[]>([]);
+  const [resizeCursor, setResizeCursor] = useState('crosshair');
+  const resizeCursorRef = useRef('crosshair');
 
   const setSelMode = useCallback((m: SelectMode) => { selectModeRef.current = m; setSelectMode(m); }, []);
   const setSelected = useCallback((ids: Set<string>) => { selectedIdsRef.current = ids; setSelectedIds(ids); }, []);
@@ -198,7 +278,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     oCtx.clearRect(0, 0, overlay.width, overlay.height);
     if (selectedIdsRef.current.size > 0) {
       const bb = getStrokesBbox(strokesRef.current.filter(s => selectedIdsRef.current.has(s.id)));
-      if (bb) drawSelBox(oCtx, bb);
+      if (bb) { drawSelBox(oCtx, bb); drawResizeHandles(oCtx, bb); }
     }
   }, []);
 
@@ -212,9 +292,10 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     redrawBase();
   }, [redrawBase]);
 
-  const sendStrokeRef      = useRef<(s: Stroke) => void>(() => {});
-  const sendMoveStrokesRef = useRef<(d: { ids: string[]; dx: number; dy: number }) => void>(() => {});
-  const sendSwitchTabRef   = useRef<(id: string) => void>(() => {});
+  const sendStrokeRef        = useRef<(s: Stroke) => void>(() => {});
+  const sendMoveStrokesRef   = useRef<(d: { ids: string[]; dx: number; dy: number }) => void>(() => {});
+  const sendSwitchTabRef     = useRef<(id: string) => void>(() => {});
+  const sendResizeStrokesRef = useRef<(u: Array<{ id: string; points: Point[]; width: number }>) => void>(() => {});
 
   const loadImages = useCallback((strokes: Stroke[]) => {
     const uncached = strokes.filter(s => s.tool === 'image' && s.imageData && !imageCacheRef.current.has(s.id));
@@ -287,11 +368,23 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
 
   const onMoveStrokes = useCallback((data: { ids: string[]; dx: number; dy: number }) => {
     const idsSet = new Set(data.ids);
-    strokesRef.current = strokesRef.current.map(s =>
-      idsSet.has(s.id) ? { ...s, points: s.points.map(p => ({ x: p.x + data.dx, y: p.y + data.dy })) } : s
-    );
+    strokesRef.current = strokesRef.current.map(s => {
+      if (!idsSet.has(s.id)) return s;
+      if (s.tool === 'image') return { ...s, points: [{ x: s.points[0].x + data.dx, y: s.points[0].y + data.dy }, s.points[1]] };
+      return { ...s, points: s.points.map(p => ({ x: p.x + data.dx, y: p.y + data.dy })) };
+    });
     redrawBase();
   }, [redrawBase]);
+
+  const onResizeStrokes = useCallback((updates: Array<{ id: string; points: Point[]; width: number }>) => {
+    const updMap = new Map(updates.map(u => [u.id, u]));
+    strokesRef.current = strokesRef.current.map(s => {
+      const upd = updMap.get(s.id);
+      return upd ? { ...s, points: upd.points, width: upd.width } : s;
+    });
+    redrawBase();
+    requestAnimationFrame(showSelOverlay);
+  }, [redrawBase, showSelOverlay]);
 
   const onTabCreated = useCallback((tab: TabInfo) => { setTabs(prev => [...prev, tab]); }, []);
 
@@ -332,16 +425,17 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
 
   const {
     sendStroke, sendClear, sendUndo, sendCursorMove, sendCursorLeave,
-    sendChatMessage, sendSwitchTab, sendCreateTab, sendDeleteTab, sendMoveStrokes,
+    sendChatMessage, sendSwitchTab, sendCreateTab, sendDeleteTab, sendMoveStrokes, sendResizeStrokes,
   } = useSocket(roomId, userName, {
-    onInitRoom, onInitTab, onStroke, onClear, onUndo, onMoveStrokes,
+    onInitRoom, onInitTab, onStroke, onClear, onUndo, onMoveStrokes, onResizeStrokes,
     onUserCount: setUserCount, onTabCreated, onTabDeleted, onUserTabUpdate,
     onUserLeft, onCursorMove, onCursorLeave, onChatMessage,
   });
 
-  sendStrokeRef.current      = sendStroke;
-  sendMoveStrokesRef.current = sendMoveStrokes;
-  sendSwitchTabRef.current   = sendSwitchTab;
+  sendStrokeRef.current        = sendStroke;
+  sendMoveStrokesRef.current   = sendMoveStrokes;
+  sendSwitchTabRef.current     = sendSwitchTab;
+  sendResizeStrokesRef.current = sendResizeStrokes;
 
   useEffect(() => {
     resizeCanvases();
@@ -388,17 +482,36 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
         if (selectModeRef.current === 'selected') {
           const selStrokes = strokesRef.current.filter(s => selectedIdsRef.current.has(s.id));
           const bb = getStrokesBbox(selStrokes);
-          if (bboxContains(bb, pos)) {
-            // Start move: snapshot base without selected strokes
-            selectModeRef.current = 'moving'; setSelectMode('moving');
-            moveStartRef.current = pos;
-            const bCtx = baseCtx(); const bCanvas = baseRef.current;
-            if (bCtx && bCanvas) {
-              bCtx.fillStyle = '#ffffff'; bCtx.fillRect(0, 0, bCanvas.width, bCanvas.height);
-              strokesRef.current.filter(s => !selectedIdsRef.current.has(s.id)).forEach(s => renderStroke(bCtx, s, imageCacheRef.current));
-              preMoveRef.current = bCtx.getImageData(0, 0, bCanvas.width, bCanvas.height);
+          if (bb) {
+            const handle = getResizeHandle(bb, pos);
+            if (handle) {
+              // Start resize: snapshot base without selected strokes
+              selectModeRef.current = 'resizing'; setSelectMode('resizing');
+              resizeHandleRef.current = handle;
+              resizeOrigBboxRef.current = bb;
+              resizeOrigStrokesRef.current = selStrokes;
+              const newCur = RESIZE_CURSOR[handle];
+              resizeCursorRef.current = newCur; setResizeCursor(newCur);
+              const bCtx = baseCtx(); const bCanvas = baseRef.current;
+              if (bCtx && bCanvas) {
+                bCtx.fillStyle = '#ffffff'; bCtx.fillRect(0, 0, bCanvas.width, bCanvas.height);
+                strokesRef.current.filter(s => !selectedIdsRef.current.has(s.id)).forEach(s => renderStroke(bCtx, s, imageCacheRef.current));
+                preMoveRef.current = bCtx.getImageData(0, 0, bCanvas.width, bCanvas.height);
+              }
+              return;
             }
-            return;
+            if (bboxContains(bb, pos)) {
+              // Start move: snapshot base without selected strokes
+              selectModeRef.current = 'moving'; setSelectMode('moving');
+              moveStartRef.current = pos;
+              const bCtx = baseCtx(); const bCanvas = baseRef.current;
+              if (bCtx && bCanvas) {
+                bCtx.fillStyle = '#ffffff'; bCtx.fillRect(0, 0, bCanvas.width, bCanvas.height);
+                strokesRef.current.filter(s => !selectedIdsRef.current.has(s.id)).forEach(s => renderStroke(bCtx, s, imageCacheRef.current));
+                preMoveRef.current = bCtx.getImageData(0, 0, bCanvas.width, bCanvas.height);
+              }
+              return;
+            }
           }
         }
         // Start new selection rect
@@ -445,10 +558,37 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
           if (oCtx && ov) {
             oCtx.clearRect(0, 0, ov.width, ov.height);
             const moved = strokesRef.current.filter(s => selectedIdsRef.current.has(s.id))
-              .map(s => ({ ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) }));
+              .map(s => s.tool === 'image'
+                ? { ...s, points: [{ x: s.points[0].x + dx, y: s.points[0].y + dy }, s.points[1]] }
+                : { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) });
             moved.forEach(s => renderStroke(oCtx, s, imageCacheRef.current));
-            const bb = getStrokesBbox(moved); if (bb) drawSelBox(oCtx, bb);
+            const bb = getStrokesBbox(moved); if (bb) { drawSelBox(oCtx, bb); drawResizeHandles(oCtx, bb); }
           }
+        } else if (selectModeRef.current === 'resizing') {
+          const origBbox = resizeOrigBboxRef.current;
+          if (origBbox) {
+            const newBbox = computeResizeBbox(origBbox, resizeHandleRef.current, pos);
+            const bCtx = baseCtx();
+            if (bCtx && preMoveRef.current) bCtx.putImageData(preMoveRef.current, 0, 0);
+            const oCtx = overlayCtx(); const ov = overlayRef.current;
+            if (oCtx && ov) {
+              oCtx.clearRect(0, 0, ov.width, ov.height);
+              const scaled = resizeOrigStrokesRef.current.map(s => scaleStroke(s, origBbox, newBbox));
+              scaled.forEach(s => renderStroke(oCtx, s, imageCacheRef.current));
+              const scaledBb = getStrokesBbox(scaled);
+              if (scaledBb) { drawSelBox(oCtx, scaledBb); drawResizeHandles(oCtx, scaledBb); }
+            }
+          }
+        } else if (selectModeRef.current === 'selected') {
+          // Update hover cursor for resize handles
+          const selStrokes = strokesRef.current.filter(s => selectedIdsRef.current.has(s.id));
+          const bb = getStrokesBbox(selStrokes);
+          let newCur = 'crosshair';
+          if (bb) {
+            const h = getResizeHandle(bb, pos);
+            newCur = h ? RESIZE_CURSOR[h] : bboxContains(bb, pos) ? 'move' : 'crosshair';
+          }
+          if (newCur !== resizeCursorRef.current) { resizeCursorRef.current = newCur; setResizeCursor(newCur); }
         }
         return;
       }
@@ -464,10 +604,11 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     const commitMove = (pos: Point) => {
       const dx = pos.x - moveStartRef.current.x;
       const dy = pos.y - moveStartRef.current.y;
-      strokesRef.current = strokesRef.current.map(s =>
-        selectedIdsRef.current.has(s.id)
-          ? { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) } : s
-      );
+      strokesRef.current = strokesRef.current.map(s => {
+        if (!selectedIdsRef.current.has(s.id)) return s;
+        if (s.tool === 'image') return { ...s, points: [{ x: s.points[0].x + dx, y: s.points[0].y + dy }, s.points[1]] };
+        return { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) };
+      });
       preMoveRef.current = null;
       redrawBase();
       showSelOverlay();
@@ -501,6 +642,23 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
           setSelectMode(newSel.size > 0 ? 'selected' : 'idle');
         } else if (selectModeRef.current === 'moving') {
           commitMove(pos);
+        } else if (selectModeRef.current === 'resizing') {
+          const origBbox = resizeOrigBboxRef.current;
+          if (origBbox) {
+            const newBbox = computeResizeBbox(origBbox, resizeHandleRef.current, pos);
+            const origSnap = resizeOrigStrokesRef.current.map(s => ({ id: s.id, points: s.points, width: s.width }));
+            const scaled   = resizeOrigStrokesRef.current.map(s => scaleStroke(s, origBbox, newBbox));
+            const scaledMap = new Map(scaled.map(s => [s.id, s]));
+            strokesRef.current = strokesRef.current.map(s => scaledMap.get(s.id) ?? s);
+            preMoveRef.current = null;
+            redrawBase(); showSelOverlay();
+            undoStackRef.current.push({ type: 'resize', origStrokes: origSnap });
+            sendResizeStrokesRef.current(scaled.map(s => ({ id: s.id, points: s.points, width: s.width })));
+          } else {
+            preMoveRef.current = null; redrawBase(); showSelOverlay();
+          }
+          selectModeRef.current = 'selected'; setSelectMode('selected');
+          resizeCursorRef.current = 'crosshair'; setResizeCursor('crosshair');
         }
         return;
       }
@@ -523,6 +681,12 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
           if (preMoveRef.current) { const bCtx = baseCtx(); if (bCtx) bCtx.putImageData(preMoveRef.current, 0, 0); preMoveRef.current = null; }
           showSelOverlay();
           selectModeRef.current = 'selected'; setSelectMode('selected');
+        } else if (selectModeRef.current === 'resizing') {
+          // Cancel resize, restore
+          if (preMoveRef.current) { const bCtx = baseCtx(); if (bCtx) bCtx.putImageData(preMoveRef.current, 0, 0); preMoveRef.current = null; }
+          showSelOverlay();
+          selectModeRef.current = 'selected'; setSelectMode('selected');
+          resizeCursorRef.current = 'crosshair'; setResizeCursor('crosshair');
         } else if (selectModeRef.current === 'selecting') {
           const oCtx = overlayCtx(); const ov = overlayRef.current;
           if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
@@ -557,7 +721,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       canvas.removeEventListener('touchmove',  move);
       canvas.removeEventListener('touchend',   end);
     };
-  }, [sendStroke, sendCursorMove, sendCursorLeave, commitText, userId, userName, redrawBase, setSelected, showSelOverlay]);
+  }, [sendStroke, sendCursorMove, sendCursorLeave, commitText, userId, userName, redrawBase, setSelected, showSelOverlay, setResizeCursor]);
 
   const handleUndo = useCallback(() => {
     if (undoStackRef.current.length === 0) return;
@@ -566,16 +730,26 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       strokesRef.current = strokesRef.current.filter(s => s.id !== entry.id);
       if (selectedIdsRef.current.has(entry.id)) { const next = new Set(selectedIdsRef.current); next.delete(entry.id); setSelected(next); }
       redrawBase(); sendUndo(entry.id);
-    } else {
+    } else if (entry.type === 'move') {
       const dx = -entry.dx, dy = -entry.dy;
       const idsSet = new Set(entry.ids);
-      strokesRef.current = strokesRef.current.map(s =>
-        idsSet.has(s.id) ? { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) } : s
-      );
+      strokesRef.current = strokesRef.current.map(s => {
+        if (!idsSet.has(s.id)) return s;
+        if (s.tool === 'image') return { ...s, points: [{ x: s.points[0].x + dx, y: s.points[0].y + dy }, s.points[1]] };
+        return { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) };
+      });
       redrawBase(); showSelOverlay();
       sendMoveStrokes({ ids: entry.ids, dx, dy });
+    } else {
+      const updMap = new Map(entry.origStrokes.map(u => [u.id, u]));
+      strokesRef.current = strokesRef.current.map(s => {
+        const orig = updMap.get(s.id);
+        return orig ? { ...s, points: orig.points, width: orig.width } : s;
+      });
+      redrawBase(); showSelOverlay();
+      sendResizeStrokes(entry.origStrokes);
     }
-  }, [redrawBase, sendUndo, sendMoveStrokes, setSelected, showSelOverlay]);
+  }, [redrawBase, sendUndo, sendMoveStrokes, sendResizeStrokes, setSelected, showSelOverlay]);
 
   // Paste image onto whiteboard (skip when focus is in a textarea/input)
   useEffect(() => {
@@ -645,7 +819,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
 
   const cursor = tool === 'text' ? 'text'
     : tool === 'eraser' ? 'cell'
-    : tool === 'select' ? (selectMode === 'moving' ? 'grabbing' : 'crosshair')
+    : tool === 'select' ? (selectMode === 'moving' ? 'grabbing' : resizeCursor)
     : 'crosshair';
 
   const fontSize = Math.max(12, width * 4);

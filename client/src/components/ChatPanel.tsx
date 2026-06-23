@@ -33,6 +33,7 @@ async function compressChatImage(file: File, maxW = 600, maxH = 500): Promise<st
 export default function ChatPanel({ messages, userName, onSend, onClose }: Props) {
   const [input, setInput] = useState('');
   const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -86,8 +87,8 @@ export default function ChatPanel({ messages, userName, onSend, onClose }: Props
                   <img
                     src={msg.imageData}
                     alt="画像"
-                    style={{ display: 'block', maxWidth: '100%', borderRadius: 6, marginTop: msg.text ? 6 : 0, cursor: 'pointer' }}
-                    onClick={() => window.open(msg.imageData)}
+                    style={{ display: 'block', maxWidth: '100%', borderRadius: 6, marginTop: msg.text ? 6 : 0, cursor: 'zoom-in' }}
+                    onClick={() => setLightboxSrc(msg.imageData!)}
                   />
                 )}
               </div>
@@ -128,6 +129,30 @@ export default function ChatPanel({ messages, userName, onSend, onClose }: Props
           ↑
         </button>
       </div>
+
+      {/* Lightbox */}
+      {lightboxSrc && (
+        <div
+          onClick={() => setLightboxSrc(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0,0,0,0.85)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'zoom-out',
+          }}
+        >
+          <img
+            src={lightboxSrc}
+            alt="全画面"
+            style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8, boxShadow: '0 8px 40px rgba(0,0,0,0.6)' }}
+            onClick={e => e.stopPropagation()}
+          />
+          <button
+            onClick={() => setLightboxSrc(null)}
+            style={{ position: 'absolute', top: 16, right: 20, background: 'none', border: 'none', color: '#fff', fontSize: 28, cursor: 'pointer', lineHeight: 1 }}
+          >✕</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -159,12 +159,25 @@ io.on('connection', (socket) => {
     const tab = room.tabs.find((t) => t.id === currentTabId);
     if (!tab) return;
     const idsSet = new Set(data.ids);
-    tab.strokes = tab.strokes.map((s) =>
-      idsSet.has(s.id)
-        ? { ...s, points: s.points.map((p) => ({ x: p.x + data.dx, y: p.y + data.dy })) }
-        : s
-    );
+    tab.strokes = tab.strokes.map((s) => {
+      if (!idsSet.has(s.id)) return s;
+      if (s.tool === 'image') return { ...s, points: [{ x: s.points[0].x + data.dx, y: s.points[0].y + data.dy }, s.points[1]] };
+      return { ...s, points: s.points.map((p) => ({ x: p.x + data.dx, y: p.y + data.dy })) };
+    });
     socket.to(tabRoomId(currentRoomId, currentTabId)).emit('move-strokes', data);
+  });
+
+  socket.on('resize-strokes', (updates: Array<{ id: string; points: Point[]; width: number }>) => {
+    if (!currentRoomId || !currentTabId) return;
+    const room = getRoom(currentRoomId);
+    const tab = room.tabs.find((t) => t.id === currentTabId);
+    if (!tab) return;
+    const updMap = new Map(updates.map((u) => [u.id, u]));
+    tab.strokes = tab.strokes.map((s) => {
+      const upd = updMap.get(s.id);
+      return upd ? { ...s, points: upd.points, width: upd.width } : s;
+    });
+    socket.to(tabRoomId(currentRoomId, currentTabId)).emit('resize-strokes', updates);
   });
 
   socket.on('chat-message', (data: { id: string; userName: string; text: string; imageData?: string }) => {
