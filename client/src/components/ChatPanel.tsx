@@ -4,7 +4,7 @@ import { ChatMessage } from '../types';
 interface Props {
   messages: ChatMessage[];
   userName: string;
-  onSend: (text: string) => void;
+  onSend: (text: string, imageData?: string) => void;
   onClose: () => void;
 }
 
@@ -13,8 +13,26 @@ function formatTime(ts: number) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+async function compressChatImage(file: File, maxW = 600, maxH = 500): Promise<string> {
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      let { naturalWidth: w, naturalHeight: h } = img;
+      if (w > maxW || h > maxH) { const r = Math.min(maxW / w, maxH / h); w = Math.round(w * r); h = Math.round(h * r); }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d')!.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.82));
+    };
+    img.src = url;
+  });
+}
+
 export default function ChatPanel({ messages, userName, onSend, onClose }: Props) {
   const [input, setInput] = useState('');
+  const [pendingImage, setPendingImage] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -23,9 +41,21 @@ export default function ChatPanel({ messages, userName, onSend, onClose }: Props
 
   const send = () => {
     const text = input.trim();
-    if (!text) return;
-    onSend(text);
+    if (!text && !pendingImage) return;
+    onSend(text, pendingImage ?? undefined);
     setInput('');
+    setPendingImage(null);
+  };
+
+  const handleTextareaPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItem = items.find(item => item.type.startsWith('image/'));
+    if (!imageItem) return;
+    e.preventDefault();
+    const file = imageItem.getAsFile();
+    if (!file) return;
+    const dataUrl = await compressChatImage(file);
+    setPendingImage(dataUrl);
   };
 
   return (
@@ -51,7 +81,15 @@ export default function ChatPanel({ messages, userName, onSend, onClose }: Props
                 <span style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>{msg.userName}</span>
               )}
               <div style={bubble(isMe)}>
-                {msg.text}
+                {msg.text && <span>{msg.text}</span>}
+                {msg.imageData && (
+                  <img
+                    src={msg.imageData}
+                    alt="画像"
+                    style={{ display: 'block', maxWidth: '100%', borderRadius: 6, marginTop: msg.text ? 6 : 0, cursor: 'pointer' }}
+                    onClick={() => window.open(msg.imageData)}
+                  />
+                )}
               </div>
               <span style={{ fontSize: 10, color: '#94a3b8', marginLeft: 4, marginRight: 4 }}>
                 {formatTime(msg.timestamp)}
@@ -64,17 +102,29 @@ export default function ChatPanel({ messages, userName, onSend, onClose }: Props
 
       {/* Input */}
       <div style={inputArea}>
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); send(); }
-          }}
-          placeholder={'メッセージを入力...\n(Shift+Enter で送信)'}
-          rows={2}
-          style={inputStyle}
-        />
-        <button onClick={send} disabled={!input.trim()} style={sendBtn}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {pendingImage && (
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <img src={pendingImage} alt="送信予定" style={{ maxWidth: '100%', maxHeight: 80, borderRadius: 6, border: '1px solid #e2e8f0' }} />
+              <button
+                onClick={() => setPendingImage(null)}
+                style={{ position: 'absolute', top: 2, right: 2, background: 'rgba(0,0,0,0.55)', color: '#fff', border: 'none', borderRadius: '50%', width: 18, height: 18, fontSize: 10, cursor: 'pointer', lineHeight: 1 }}
+              >✕</button>
+            </div>
+          )}
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); send(); }
+            }}
+            onPaste={handleTextareaPaste}
+            placeholder={'メッセージを入力...\n(画像もペースト可 / Shift+Enter で送信)'}
+            rows={2}
+            style={inputStyle}
+          />
+        </div>
+        <button onClick={send} disabled={!input.trim() && !pendingImage} style={sendBtn}>
           ↑
         </button>
       </div>

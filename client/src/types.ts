@@ -1,4 +1,4 @@
-export type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle' | 'text' | 'select';
+export type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle' | 'text' | 'select' | 'image';
 
 export interface Point {
   x: number;
@@ -13,6 +13,7 @@ export interface Stroke {
   points: Point[];
   userId: string;
   text?: string;
+  imageData?: string;
 }
 
 export interface ChatMessage {
@@ -20,6 +21,7 @@ export interface ChatMessage {
   userName: string;
   text: string;
   timestamp: number;
+  imageData?: string;
 }
 
 export interface TabInfo {

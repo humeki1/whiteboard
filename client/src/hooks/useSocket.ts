@@ -69,7 +69,7 @@ export function useSocket(roomId: string, userName: string, callbacks: Callbacks
     socketRef.current?.emit('cursor-leave');
   }, []);
 
-  const sendChatMessage = useCallback((msg: { id: string; userName: string; text: string }) => {
+  const sendChatMessage = useCallback((msg: { id: string; userName: string; text: string; imageData?: string }) => {
     socketRef.current?.emit('chat-message', msg);
   }, []);
 

@@ -18,8 +18,29 @@ function userColor(id: string): string {
   return `hsl(${h % 360}, 75%, 48%)`;
 }
 
+function compressImageFile(file: File, maxW = 900, maxH = 700): Promise<string> {
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      let { naturalWidth: w, naturalHeight: h } = img;
+      if (w > maxW || h > maxH) { const r = Math.min(maxW / w, maxH / h); w = Math.round(w * r); h = Math.round(h * r); }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d')!.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.85));
+    };
+    img.src = url;
+  });
+}
+
 function getStrokeBbox(s: Stroke): { minX: number; minY: number; maxX: number; maxY: number } | null {
   if (s.points.length === 0) return null;
+  if (s.tool === 'image' && s.points.length >= 2) {
+    const [pos, dim] = s.points;
+    return { minX: pos.x, minY: pos.y, maxX: pos.x + dim.x, maxY: pos.y + dim.y };
+  }
   if (s.tool === 'text' && s.text) {
     const fs = Math.max(12, s.width * 4);
     const lines = s.text.split('\n');
@@ -64,9 +85,14 @@ function drawSelBox(ctx: CanvasRenderingContext2D, b: NonNullable<ReturnType<typ
   ctx.setLineDash([]); ctx.restore();
 }
 
-function renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
+function renderStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, cache?: Map<string, HTMLImageElement>) {
   const { tool, color, width, points } = stroke;
   if (points.length === 0) return;
+  if (tool === 'image') {
+    const img = cache?.get(stroke.id);
+    if (img && points.length >= 2) ctx.drawImage(img, points[0].x, points[0].y, points[1].x, points[1].y);
+    return;
+  }
   ctx.save();
   ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : color;
   ctx.fillStyle   = tool === 'eraser' ? '#ffffff' : color;
@@ -138,6 +164,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const moveStartRef   = useRef<Point>({ x: 0, y: 0 });
   const preMoveRef     = useRef<ImageData | null>(null);
   const undoStackRef   = useRef<UndoEntry[]>([]);
+  const imageCacheRef  = useRef<Map<string, HTMLImageElement>>(new Map());
 
   const setSelMode = useCallback((m: SelectMode) => { selectModeRef.current = m; setSelectMode(m); }, []);
   const setSelected = useCallback((ids: Set<string>) => { selectedIdsRef.current = ids; setSelectedIds(ids); }, []);
@@ -162,7 +189,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     const canvas = baseRef.current; const ctx = baseCtx();
     if (!canvas || !ctx) return;
     ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    strokesRef.current.forEach(s => { if (!skipIds?.has(s.id)) renderStroke(ctx, s); });
+    strokesRef.current.forEach(s => { if (!skipIds?.has(s.id)) renderStroke(ctx, s, imageCacheRef.current); });
   }, []);
 
   const showSelOverlay = useCallback(() => {
@@ -189,6 +216,21 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const sendMoveStrokesRef = useRef<(d: { ids: string[]; dx: number; dy: number }) => void>(() => {});
   const sendSwitchTabRef   = useRef<(id: string) => void>(() => {});
 
+  const loadImages = useCallback((strokes: Stroke[]) => {
+    const uncached = strokes.filter(s => s.tool === 'image' && s.imageData && !imageCacheRef.current.has(s.id));
+    if (uncached.length === 0) return;
+    let done = 0;
+    uncached.forEach(s => {
+      const img = new Image();
+      img.onload = () => {
+        imageCacheRef.current.set(s.id, img);
+        done++;
+        if (done === uncached.length) redrawBase();
+      };
+      img.src = s.imageData!;
+    });
+  }, [redrawBase]);
+
   const commitText = useCallback(() => {
     const ti = textStateRef.current;
     setTextInput(null);
@@ -198,7 +240,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       points: [{ x: ti.x, y: ti.y }], text: ti.value.trim(), userId,
     };
     strokesRef.current.push(stroke);
-    const ctx = baseCtx(); if (ctx) renderStroke(ctx, stroke);
+    const ctx = baseCtx(); if (ctx) renderStroke(ctx, stroke, imageCacheRef.current);
     sendStrokeRef.current(stroke);
     undoStackRef.current.push({ type: 'stroke', id: stroke.id });
   }, [userId]);
@@ -208,7 +250,8 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     setMySocketId(data.socketId); setTabs(data.tabs); setCurrentTabId(data.currentTabId);
     setUserTabs(data.userTabs); setSelected(new Set()); setSelMode('idle');
     strokesRef.current = data.strokes; undoStackRef.current = []; redrawBase();
-  }, [redrawBase, setSelected, setSelMode]);
+    loadImages(data.strokes);
+  }, [redrawBase, loadImages, setSelected, setSelMode]);
 
   const onInitTab = useCallback((strokes: Stroke[]) => {
     setSelected(new Set()); setSelMode('idle');
@@ -216,12 +259,17 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     const oCtx = overlayCtx(); const ov = overlayRef.current;
     if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
     redrawBase();
-  }, [redrawBase, setSelected, setSelMode]);
+    loadImages(strokes);
+  }, [redrawBase, loadImages, setSelected, setSelMode]);
 
   const onStroke = useCallback((stroke: Stroke) => {
     strokesRef.current.push(stroke);
-    const ctx = baseCtx(); if (ctx) renderStroke(ctx, stroke);
-  }, []);
+    if (stroke.tool === 'image') {
+      loadImages([stroke]);
+    } else {
+      const ctx = baseCtx(); if (ctx) renderStroke(ctx, stroke, imageCacheRef.current);
+    }
+  }, [loadImages]);
 
   const onClear = useCallback(() => {
     setSelected(new Set()); setSelMode('idle');
@@ -347,7 +395,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
             const bCtx = baseCtx(); const bCanvas = baseRef.current;
             if (bCtx && bCanvas) {
               bCtx.fillStyle = '#ffffff'; bCtx.fillRect(0, 0, bCanvas.width, bCanvas.height);
-              strokesRef.current.filter(s => !selectedIdsRef.current.has(s.id)).forEach(s => renderStroke(bCtx, s));
+              strokesRef.current.filter(s => !selectedIdsRef.current.has(s.id)).forEach(s => renderStroke(bCtx, s, imageCacheRef.current));
               preMoveRef.current = bCtx.getImageData(0, 0, bCanvas.width, bCanvas.height);
             }
             return;
@@ -398,7 +446,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
             oCtx.clearRect(0, 0, ov.width, ov.height);
             const moved = strokesRef.current.filter(s => selectedIdsRef.current.has(s.id))
               .map(s => ({ ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) }));
-            moved.forEach(s => renderStroke(oCtx, s));
+            moved.forEach(s => renderStroke(oCtx, s, imageCacheRef.current));
             const bb = getStrokesBbox(moved); if (bb) drawSelBox(oCtx, bb);
           }
         }
@@ -461,7 +509,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       drawing.current = false;
       const stroke = activeStroke.current; activeStroke.current = null;
       strokesRef.current.push(stroke);
-      const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke);
+      const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke, imageCacheRef.current);
       const oCtx = overlayCtx(); if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
       sendStroke(stroke);
       undoStackRef.current.push({ type: 'stroke', id: stroke.id });
@@ -486,7 +534,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
         drawing.current = false;
         const stroke = activeStroke.current; activeStroke.current = null;
         strokesRef.current.push(stroke);
-        const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke);
+        const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke, imageCacheRef.current);
         const oCtx = overlayCtx(); if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
         sendStroke(stroke);
         undoStackRef.current.push({ type: 'stroke', id: stroke.id });
@@ -529,6 +577,40 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     }
   }, [redrawBase, sendUndo, sendMoveStrokes, setSelected, showSelOverlay]);
 
+  // Paste image onto whiteboard (skip when focus is in a textarea/input)
+  useEffect(() => {
+    const handlePaste = async (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') return;
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const imageItem = items.find(item => item.type.startsWith('image/'));
+      if (!imageItem) return;
+      const file = imageItem.getAsFile();
+      if (!file) return;
+      const dataUrl = await compressImageFile(file);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = baseRef.current;
+        if (!canvas) return;
+        const x = Math.max(0, (canvas.width  - img.naturalWidth)  / 2);
+        const y = Math.max(0, (canvas.height - img.naturalHeight) / 2);
+        const stroke: Stroke = {
+          id: uuid(), tool: 'image', color: '', width: 0,
+          points: [{ x, y }, { x: img.naturalWidth, y: img.naturalHeight }],
+          userId, imageData: dataUrl,
+        };
+        strokesRef.current.push(stroke);
+        imageCacheRef.current.set(stroke.id, img);
+        undoStackRef.current.push({ type: 'stroke', id: stroke.id });
+        redrawBase();
+        sendStrokeRef.current(stroke);
+      };
+      img.src = dataUrl;
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [userId, redrawBase]);
+
   const handleClear = useCallback(() => {
     if (!confirm('このページを全消去しますか？')) return;
     sendClear();
@@ -543,10 +625,10 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
 
   const handleChatToggle = () => { setChatOpen(v => !v); setUnread(0); };
 
-  const handleSendChat = useCallback((text: string) => {
+  const handleSendChat = useCallback((text: string, imageData?: string) => {
     const id = uuid();
-    setChatMessages(prev => [...prev, { id, userName, text, timestamp: Date.now() }]);
-    sendChatMessage({ id, userName, text });
+    setChatMessages(prev => [...prev, { id, userName, text, timestamp: Date.now(), imageData }]);
+    sendChatMessage({ id, userName, text, imageData });
   }, [userName, sendChatMessage]);
 
   const handleSwitchTab = useCallback((tabId: string) => {

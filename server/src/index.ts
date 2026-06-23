@@ -15,12 +15,12 @@ const io = new Server(httpServer, {
   },
 });
 
-type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle' | 'text';
+type Tool = 'pen' | 'eraser' | 'line' | 'rectangle' | 'circle' | 'text' | 'image';
 
 interface Point { x: number; y: number; }
 interface Stroke {
   id: string; tool: Tool; color: string; width: number;
-  points: Point[]; userId: string; text?: string;
+  points: Point[]; userId: string; text?: string; imageData?: string;
 }
 interface Tab { id: string; name: string; strokes: Stroke[]; }
 interface RoomUser { userName: string; tabId: string; }
@@ -167,7 +167,7 @@ io.on('connection', (socket) => {
     socket.to(tabRoomId(currentRoomId, currentTabId)).emit('move-strokes', data);
   });
 
-  socket.on('chat-message', (data: { id: string; userName: string; text: string }) => {
+  socket.on('chat-message', (data: { id: string; userName: string; text: string; imageData?: string }) => {
     if (!currentRoomId) return;
     // socket.to (not io.to): excludes sender — client adds message locally to avoid duplicate
     socket.to(currentRoomId).emit('chat-message', { ...data, timestamp: Date.now() });
