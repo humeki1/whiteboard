@@ -10,6 +10,7 @@ interface Props { roomId: string; userName: string; onLeave: () => void; }
 interface RemoteCursor { x: number; y: number; color: string; userName: string; }
 interface TextInputState { x: number; y: number; value: string; }
 type SelectMode = 'idle' | 'selecting' | 'selected' | 'moving';
+type UndoEntry = { type: 'stroke'; id: string } | { type: 'move'; ids: string[]; dx: number; dy: number };
 
 function userColor(id: string): string {
   let h = 0;
@@ -136,6 +137,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   const selStartRef    = useRef<Point>({ x: 0, y: 0 });
   const moveStartRef   = useRef<Point>({ x: 0, y: 0 });
   const preMoveRef     = useRef<ImageData | null>(null);
+  const undoStackRef   = useRef<UndoEntry[]>([]);
 
   const setSelMode = useCallback((m: SelectMode) => { selectModeRef.current = m; setSelectMode(m); }, []);
   const setSelected = useCallback((ids: Set<string>) => { selectedIdsRef.current = ids; setSelectedIds(ids); }, []);
@@ -198,18 +200,19 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
     strokesRef.current.push(stroke);
     const ctx = baseCtx(); if (ctx) renderStroke(ctx, stroke);
     sendStrokeRef.current(stroke);
+    undoStackRef.current.push({ type: 'stroke', id: stroke.id });
   }, [userId]);
 
   // Socket callbacks
   const onInitRoom = useCallback((data: InitRoomData) => {
     setMySocketId(data.socketId); setTabs(data.tabs); setCurrentTabId(data.currentTabId);
     setUserTabs(data.userTabs); setSelected(new Set()); setSelMode('idle');
-    strokesRef.current = data.strokes; redrawBase();
+    strokesRef.current = data.strokes; undoStackRef.current = []; redrawBase();
   }, [redrawBase, setSelected, setSelMode]);
 
   const onInitTab = useCallback((strokes: Stroke[]) => {
     setSelected(new Set()); setSelMode('idle');
-    strokesRef.current = strokes; setCursors({});
+    strokesRef.current = strokes; undoStackRef.current = []; setCursors({});
     const oCtx = overlayCtx(); const ov = overlayRef.current;
     if (oCtx && ov) oCtx.clearRect(0, 0, ov.width, ov.height);
     redrawBase();
@@ -222,7 +225,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
 
   const onClear = useCallback(() => {
     setSelected(new Set()); setSelMode('idle');
-    strokesRef.current = []; redrawBase();
+    strokesRef.current = []; undoStackRef.current = []; redrawBase();
   }, [redrawBase, setSelected, setSelMode]);
 
   const onUndo = useCallback((strokeId: string) => {
@@ -420,7 +423,11 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       preMoveRef.current = null;
       redrawBase();
       showSelOverlay();
-      if (dx !== 0 || dy !== 0) sendMoveStrokesRef.current({ ids: Array.from(selectedIdsRef.current), dx, dy });
+      if (dx !== 0 || dy !== 0) {
+        const ids = Array.from(selectedIdsRef.current);
+        sendMoveStrokesRef.current({ ids, dx, dy });
+        undoStackRef.current.push({ type: 'move', ids, dx, dy });
+      }
       selectModeRef.current = 'selected'; setSelectMode('selected');
     };
 
@@ -457,6 +464,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
       const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke);
       const oCtx = overlayCtx(); if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
       sendStroke(stroke);
+      undoStackRef.current.push({ type: 'stroke', id: stroke.id });
     };
 
     const leave = () => {
@@ -481,6 +489,7 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
         const bCtx = baseCtx(); if (bCtx) renderStroke(bCtx, stroke);
         const oCtx = overlayCtx(); if (oCtx) oCtx.clearRect(0, 0, canvas.width, canvas.height);
         sendStroke(stroke);
+        undoStackRef.current.push({ type: 'stroke', id: stroke.id });
       }
     };
 
@@ -503,13 +512,22 @@ export default function Whiteboard({ roomId, userName, onLeave }: Props) {
   }, [sendStroke, sendCursorMove, sendCursorLeave, commitText, userId, userName, redrawBase, setSelected, showSelOverlay]);
 
   const handleUndo = useCallback(() => {
-    const mine = strokesRef.current.filter(s => s.userId === userId);
-    if (mine.length === 0) return;
-    const last = mine[mine.length - 1];
-    strokesRef.current = strokesRef.current.filter(s => s.id !== last.id);
-    if (selectedIdsRef.current.has(last.id)) { const next = new Set(selectedIdsRef.current); next.delete(last.id); setSelected(next); }
-    redrawBase(); sendUndo(last.id);
-  }, [redrawBase, sendUndo, userId, setSelected]);
+    if (undoStackRef.current.length === 0) return;
+    const entry = undoStackRef.current.pop()!;
+    if (entry.type === 'stroke') {
+      strokesRef.current = strokesRef.current.filter(s => s.id !== entry.id);
+      if (selectedIdsRef.current.has(entry.id)) { const next = new Set(selectedIdsRef.current); next.delete(entry.id); setSelected(next); }
+      redrawBase(); sendUndo(entry.id);
+    } else {
+      const dx = -entry.dx, dy = -entry.dy;
+      const idsSet = new Set(entry.ids);
+      strokesRef.current = strokesRef.current.map(s =>
+        idsSet.has(s.id) ? { ...s, points: s.points.map(p => ({ x: p.x + dx, y: p.y + dy })) } : s
+      );
+      redrawBase(); showSelOverlay();
+      sendMoveStrokes({ ids: entry.ids, dx, dy });
+    }
+  }, [redrawBase, sendUndo, sendMoveStrokes, setSelected, showSelOverlay]);
 
   const handleClear = useCallback(() => {
     if (!confirm('このページを全消去しますか？')) return;
